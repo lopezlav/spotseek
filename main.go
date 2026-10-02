@@ -33,6 +33,7 @@ var (
 
 	auth         *spotify.Auth
 	spotifyHost  *fyne.Container
+	refreshSpotify func()
 	outEntry     *widget.Entry
 	bitrateSel   *widget.Select
 	fallbackChk  *widget.Check
@@ -130,7 +131,7 @@ func main() {
 	)
 
 	// My Spotify tab
-	spotifyHost = container.NewVBox()
+	spotifyHost = container.NewMax()
 	clientEntry := widget.NewEntry()
 	clientEntry.SetText(prefs.StringWithFallback("spotifyClientID", ""))
 	clientEntry.SetPlaceHolder("Spotify app Client ID")
@@ -138,7 +139,6 @@ func main() {
 		"Add this exact Redirect URI:  " + spotify.RedirectURL() + "\n" +
 		"Then paste the Client ID here and click Connect. The app only reads your library.")
 	clientHelp.Wrapping = fyne.TextWrapWord
-	var refreshSpotify func()
 	var connectBtn *widget.Button
 	connectBtn = widget.NewButtonWithIcon("Connect Spotify", theme.LoginIcon(), func() {
 		cid := strings.TrimSpace(clientEntry.Text)
@@ -196,7 +196,7 @@ func main() {
 	}
 	refreshSpotify()
 
-	spotifyTab := container.NewVScroll(spotifyHost)
+	spotifyTab := spotifyHost
 
 	tabs := container.NewAppTabs(
 		container.NewTabItemWithIcon("Download", theme.DownloadIcon(), linkTab),
@@ -417,15 +417,9 @@ func downloadLibraryItem(item spotify.LibraryItem) {
 
 func refreshSpotifyTab() {
 	// Rebuild the My Spotify tab after a login or logout.
-	if auth == nil || !auth.LoggedIn() {
-		spotifyHost.Objects = nil
-		spotifyHost.Add(widget.NewLabel("Reopen the app to connect."))
-		spotifyHost.Refresh()
-		return
+	if refreshSpotify != nil {
+		refreshSpotify()
 	}
-	spotifyHost.Objects = nil
-	spotifyHost.Add(buildLibraryUI(fyne.CurrentApp().Preferences(), mainWindow))
-	spotifyHost.Refresh()
 }
 
 func homeDir() string {
