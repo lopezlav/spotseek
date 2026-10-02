@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -106,7 +107,7 @@ func main() {
 	stopBtn := widget.NewButtonWithIcon("Stop", theme.CancelIcon(), nil)
 	stopBtn.Disable()
 	openBtn := widget.NewButtonWithIcon("Open folder", theme.FolderIcon(), func() {
-		_ = exec.Command("open", outEntry.Text).Start()
+		openFolder(outEntry.Text)
 	})
 
 	runBtn.OnTapped = func() {
@@ -216,30 +217,62 @@ func main() {
 }
 
 func homeDir() string {
-	h, err := exec.Command("sh", "-c", "echo $HOME").Output()
+	h, err := os.UserHomeDir()
 	if err != nil {
 		return "."
 	}
-	return strings.TrimSpace(string(h))
+	return h
 }
 
-// ensurePath adds common Homebrew and local bin folders to PATH. A macOS .app
-// started from Finder does not inherit the shell PATH, so sockseek, yt-dlp,
-// and ffmpeg would not be found without this.
+// ensurePath adds common install folders to PATH. A macOS .app started from
+// Finder, or a Windows app started from Explorer, may not inherit the shell
+// PATH, so sockseek, yt-dlp, and ffmpeg would not be found without this.
 func ensurePath() {
-	dirs := []string{
-		"/opt/homebrew/bin",
-		"/usr/local/bin",
-		filepath.Join(homeDir(), ".local", "bin"),
-		filepath.Join(homeDir(), "go", "bin"),
+	home := homeDir()
+	var dirs []string
+	switch runtime.GOOS {
+	case "windows":
+		dirs = []string{
+			filepath.Join(os.Getenv("LOCALAPPDATA"), "Microsoft", "WinGet", "Links"),
+			filepath.Join(os.Getenv("USERPROFILE"), "scoop", "shims"),
+			filepath.Join(home, ".local", "bin"),
+		}
+	case "darwin":
+		dirs = []string{
+			"/opt/homebrew/bin",
+			"/usr/local/bin",
+			filepath.Join(home, ".local", "bin"),
+			filepath.Join(home, "go", "bin"),
+		}
+	default:
+		dirs = []string{
+			"/usr/local/bin",
+			filepath.Join(home, ".local", "bin"),
+			filepath.Join(home, "go", "bin"),
+		}
 	}
 	path := os.Getenv("PATH")
 	for _, dir := range dirs {
-		if !strings.Contains(path, dir) {
-			path = dir + string(os.PathListSeparator) + path
+		if dir == "" || strings.Contains(path, dir) {
+			continue
 		}
+		path = dir + string(os.PathListSeparator) + path
 	}
 	_ = os.Setenv("PATH", path)
+}
+
+// openFolder opens a folder in the system file manager.
+func openFolder(path string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", path)
+	case "windows":
+		cmd = exec.Command("explorer", path)
+	default:
+		cmd = exec.Command("xdg-open", path)
+	}
+	_ = cmd.Start()
 }
 
 // reorderFlags moves flag arguments before positional ones so the Go flag
