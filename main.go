@@ -40,6 +40,7 @@ func addLog(s string) {
 }
 
 func main() {
+	ensurePath()
 	if len(os.Args) > 1 && os.Args[1] == "--cli" {
 		runCLI(os.Args[2:])
 		return
@@ -220,6 +221,25 @@ func homeDir() string {
 		return "."
 	}
 	return strings.TrimSpace(string(h))
+}
+
+// ensurePath adds common Homebrew and local bin folders to PATH. A macOS .app
+// started from Finder does not inherit the shell PATH, so sockseek, yt-dlp,
+// and ffmpeg would not be found without this.
+func ensurePath() {
+	dirs := []string{
+		"/opt/homebrew/bin",
+		"/usr/local/bin",
+		filepath.Join(homeDir(), ".local", "bin"),
+		filepath.Join(homeDir(), "go", "bin"),
+	}
+	path := os.Getenv("PATH")
+	for _, dir := range dirs {
+		if !strings.Contains(path, dir) {
+			path = dir + string(os.PathListSeparator) + path
+		}
+	}
+	_ = os.Setenv("PATH", path)
 }
 
 // reorderFlags moves flag arguments before positional ones so the Go flag
