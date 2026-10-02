@@ -319,13 +319,13 @@ func runCLI(args []string) {
 	}
 
 	if *extractOnly {
-		name, tracks, err := spotify.Extract(input)
+		coll, err := spotify.Extract(input)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
-		fmt.Printf("%s (%d tracks)\n", name, len(tracks))
-		for i, t := range tracks {
+		fmt.Printf("%s (%s, %d tracks)\n", coll.Name, coll.Kind, len(coll.Tracks))
+		for i, t := range coll.Tracks {
 			fmt.Printf("%3d  %-30s %-40s %ds\n", i+1, t.Artist, t.Title, t.DurationSec)
 		}
 		return

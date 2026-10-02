@@ -12,10 +12,23 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"spotseek-app/internal/spotify"
 	"spotseek-app/internal/ytdlp"
 )
+
+// normTitle lowercases and removes everything except letters and digits, so a
+// track title can be found inside a downloaded file name.
+func normTitle(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
 
 // Options controls one download run.
 type Options struct {
@@ -84,56 +97,91 @@ func Run(ctx context.Context, o *Options) (*Result, error) {
 
 	// 1. Spotify metadata
 	o.log("Reading Spotify metadata...")
-	collection, tracks, err := spotify.Extract(o.Input)
+	coll, err := spotify.Extract(o.Input)
 	if err != nil {
 		return nil, fmt.Errorf("spotify: %w", err)
 	}
+	tracks := coll.Tracks
 	if o.Limit > 0 && len(tracks) > o.Limit {
 		tracks = tracks[:o.Limit]
 	}
 	if len(tracks) == 0 {
 		return nil, fmt.Errorf("no tracks found")
 	}
-	o.log("Collection: %s (%d tracks)", collection, len(tracks))
+	o.log("Collection: %s (%d tracks)", coll.Name, len(tracks))
 
-	safe := ytdlp.SafeName(collection)
+	safe := ytdlp.SafeName(coll.Name)
 	if safe == "" {
 		safe = "spotify"
 	}
-	csvPath := filepath.Join(o.WorkDir, safe+".csv")
-	if err := writeTracksCSV(csvPath, tracks); err != nil {
-		return nil, err
-	}
+
+	ssOut := filepath.Join(o.WorkDir, "soulseek")
+	ytOut := filepath.Join(o.WorkDir, "youtube")
+	var missing []missingTrack
+	useAlbumMode := coll.Kind == "album" && coll.Artist != ""
 
 	// 2. Soulseek
-	ssOut := filepath.Join(o.WorkDir, "soulseek")
-	o.log("Downloading from Soulseek (mp3, prefer %skbps)...", o.Bitrate)
-	if err := runSockseek(ctx, o, csvPath, ssOut); err != nil {
-		return nil, err
+	if useAlbumMode {
+		// An album is usually shared as one folder. One search finds every track.
+		o.log("Album mode: searching for the album folder...")
+		n, err := runSockseekAlbum(ctx, o, coll.Artist, coll.Name, ssOut)
+		if err != nil {
+			return nil, err
+		}
+		if n > 0 {
+			o.log("Album folder found: %d audio files", n)
+			var names string
+			for _, f := range walkAudio(ssOut) {
+				names += normTitle(filepath.Base(f)) + "|"
+			}
+			for _, t := range tracks {
+				if !strings.Contains(names, normTitle(t.Title)) {
+					missing = append(missing, missingTrack{Artist: t.Artist, Title: t.Title, Duration: t.DurationSec})
+				}
+			}
+			if len(missing) > 0 {
+				o.log("%d tracks are not in the album folder", len(missing))
+				if o.UseFallback {
+					o.log("Trying YouTube Music for the missing tracks...")
+					fallback(ctx, o, missing, ytOut)
+				}
+			}
+		} else {
+			o.log("Album folder not found; using per-track search")
+			useAlbumMode = false
+		}
 	}
 
-	// 3. Missing tracks
-	ssFolder := filepath.Join(ssOut, safe)
-	indexPath := filepath.Join(ssFolder, "_index.csv")
-	missing := readMissing(indexPath, tracks)
-	if len(missing) > 0 {
-		o.log("%d tracks missing from Soulseek", len(missing))
-	}
-	ytOut := filepath.Join(o.WorkDir, "youtube")
-	if len(missing) > 0 && o.UseFallback {
-		o.log("Trying YouTube Music for the missing tracks...")
-		fallback(ctx, o, missing, ytOut)
+	if !useAlbumMode {
+		csvPath := filepath.Join(o.WorkDir, safe+".csv")
+		if err := writeTracksCSV(csvPath, tracks); err != nil {
+			return nil, err
+		}
+		o.log("Downloading from Soulseek (mp3, prefer %skbps)...", o.Bitrate)
+		if err := runSockseek(ctx, o, csvPath, ssOut); err != nil {
+			return nil, err
+		}
+		ssFolder := filepath.Join(ssOut, safe)
+		indexPath := filepath.Join(ssFolder, "_index.csv")
+		missing = readMissing(indexPath, tracks)
+		if len(missing) > 0 {
+			o.log("%d tracks missing from Soulseek", len(missing))
+		}
+		if len(missing) > 0 && o.UseFallback {
+			o.log("Trying YouTube Music for the missing tracks...")
+			fallback(ctx, o, missing, ytOut)
+		}
 	}
 
 	// 4. Normalize and merge
 	o.log("Normalizing to mp3 %skbps...", o.Bitrate)
-	files, err := normalizeAll(ctx, o, []string{ssFolder, ytOut}, o.OutputDir)
+	files, err := normalizeAll(ctx, o, []string{ssOut, ytOut}, o.OutputDir)
 	if err != nil {
 		return nil, err
 	}
 
 	res := &Result{
-		Collection: collection,
+		Collection: coll.Name,
 		Total:      len(tracks),
 		Missing:    len(missing),
 		Files:      files,
@@ -162,14 +210,7 @@ func writeTracksCSV(path string, tracks []spotify.Track) error {
 	return w.Error()
 }
 
-func runSockseek(ctx context.Context, o *Options, csvPath, outDir string) error {
-	args := []string{csvPath, "-o", outDir, "--format", "mp3", "--pref-min-bitrate", o.Bitrate}
-	if o.SoulseekUser != "" {
-		args = append(args, "--user", o.SoulseekUser)
-	}
-	if o.SoulseekPass != "" {
-		args = append(args, "--pass", o.SoulseekPass)
-	}
+func runStream(ctx context.Context, o *Options, args ...string) error {
 	cmd := exec.CommandContext(ctx, o.SockseekPath, args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -193,6 +234,37 @@ func runSockseek(ctx context.Context, o *Options, csvPath, outDir string) error 
 		o.log("sockseek finished with: %v", err)
 	}
 	return nil
+}
+
+func sockseekBaseArgs(o *Options) []string {
+	var args []string
+	if o.SoulseekUser != "" {
+		args = append(args, "--user", o.SoulseekUser)
+	}
+	if o.SoulseekPass != "" {
+		args = append(args, "--pass", o.SoulseekPass)
+	}
+	return args
+}
+
+func runSockseek(ctx context.Context, o *Options, csvPath, outDir string) error {
+	args := []string{csvPath, "-o", outDir, "--format", "mp3", "--pref-min-bitrate", o.Bitrate}
+	args = append(args, sockseekBaseArgs(o)...)
+	return runStream(ctx, o, args...)
+}
+
+// runSockseekAlbum searches for the album as one folder and downloads it.
+func runSockseekAlbum(ctx context.Context, o *Options, artist, album, outDir string) (int, error) {
+	query := album
+	if artist != "" {
+		query = artist + " - " + album
+	}
+	args := []string{query, "-o", outDir, "--format", "mp3", "--pref-min-bitrate", o.Bitrate}
+	args = append(args, sockseekBaseArgs(o)...)
+	if err := runStream(ctx, o, args...); err != nil {
+		return 0, err
+	}
+	return len(walkAudio(outDir)), nil
 }
 
 func readMissing(indexPath string, tracks []spotify.Track) []missingTrack {
