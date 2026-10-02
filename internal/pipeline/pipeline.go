@@ -33,6 +33,7 @@ func normTitle(s string) string {
 // Options controls one download run.
 type Options struct {
 	Input         string
+	Collection    *spotify.Collection // if set, Input is ignored
 	OutputDir     string
 	WorkDir       string
 	Bitrate       string // "320", "256", "192", "128"
@@ -96,10 +97,16 @@ func Run(ctx context.Context, o *Options) (*Result, error) {
 	}
 
 	// 1. Spotify metadata
-	o.log("Reading Spotify metadata...")
-	coll, err := spotify.Extract(o.Input)
-	if err != nil {
-		return nil, fmt.Errorf("spotify: %w", err)
+	var coll *spotify.Collection
+	if o.Collection != nil {
+		coll = o.Collection
+	} else {
+		o.log("Reading Spotify metadata...")
+		c, err := spotify.Extract(o.Input)
+		if err != nil {
+			return nil, fmt.Errorf("spotify: %w", err)
+		}
+		coll = c
 	}
 	tracks := coll.Tracks
 	if o.Limit > 0 && len(tracks) > o.Limit {

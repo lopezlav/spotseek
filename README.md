@@ -67,6 +67,30 @@ The code already handles Windows: the startup `PATH` fix adds the WinGet and
 scoop folders, and **Open folder** uses `explorer`. The Windows build has not
 been tested on a real Windows machine.
 
+## Connect Spotify (read-only)
+
+The **My Spotify** tab shows your playlists, albums, and liked songs, and
+downloads them with one click. This uses the official Spotify API, read-only.
+
+Setup, once:
+
+1. Open https://developer.spotify.com/dashboard and create an app.
+2. In the app settings, add this exact Redirect URI:
+   `http://127.0.0.1:48721/callback`
+   (`localhost` is not allowed by Spotify; the loopback IP is.)
+3. Copy the **Client ID** (no secret is needed; the app uses PKCE).
+4. In the app, open **My Spotify**, paste the Client ID, and click
+   **Connect Spotify**.
+5. Log in in the browser. The app saves only a refresh token, in the macOS
+   Keychain (Windows Credential Manager on Windows).
+
+Scopes requested, all read-only:
+`playlist-read-private playlist-read-collaborative user-library-read user-read-private`.
+The app never writes to your Spotify account.
+
+Spotify requires the owner of the developer app to have Premium. This is a
+Spotify rule, not an app setting.
+
 ## Command line (for testing)
 
 ```bash

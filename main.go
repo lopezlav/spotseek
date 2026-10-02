@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,10 +26,24 @@ import (
 )
 
 var (
-	logMu    sync.Mutex
-	logLines []string
-	logEntry *widget.Entry
+	logMu     sync.Mutex
+	logLines  []string
+	logEntry  *widget.Entry
 	logScroll *container.Scroll
+
+	auth         *spotify.Auth
+	spotifyHost  *fyne.Container
+	outEntry     *widget.Entry
+	bitrateSel   *widget.Select
+	fallbackChk  *widget.Check
+	userEntry    *widget.Entry
+	passEntry    *widget.Entry
+	runBtn       *widget.Button
+	stopBtn      *widget.Button
+	progress     *widget.ProgressBar
+	statusLabel  *widget.Label
+	cancel       context.CancelFunc
+	mainWindow   fyne.Window
 )
 
 func addLog(s string) {
@@ -46,47 +61,33 @@ func main() {
 		runCLI(os.Args[2:])
 		return
 	}
+
 	a := app.New()
 	a.Settings().SetTheme(theme.DarkTheme())
 	w := a.NewWindow("Spotseek")
-	w.Resize(fyne.NewSize(760, 680))
+	mainWindow = w
+	w.Resize(fyne.NewSize(820, 720))
 
 	prefs := a.Preferences()
 
 	urlEntry := widget.NewEntry()
 	urlEntry.SetPlaceHolder("Paste a Spotify playlist, album, or track link")
 
-	outDir := prefs.StringWithFallback("outputDir", filepath.Join(homeDir(), "Downloads", "Spotseek"))
-	outEntry := widget.NewEntry()
-	outEntry.SetText(outDir)
+	outEntry = widget.NewEntry()
+	outEntry.SetText(prefs.StringWithFallback("outputDir", filepath.Join(homeDir(), "Downloads", "Spotseek")))
 
-	bitrateSel := widget.NewSelect([]string{"320", "256", "192", "128"}, nil)
+	bitrateSel = widget.NewSelect([]string{"320", "256", "192", "128"}, nil)
 	bitrateSel.SetSelected(prefs.StringWithFallback("bitrate", "320"))
 
-	fallbackChk := widget.NewCheck("Use YouTube Music for tracks Soulseek cannot find", nil)
+	fallbackChk = widget.NewCheck("Use YouTube Music for tracks Soulseek cannot find", nil)
 	fallbackChk.SetChecked(prefs.BoolWithFallback("fallback", true))
 
-	userEntry := widget.NewEntry()
+	userEntry = widget.NewEntry()
 	userEntry.SetPlaceHolder("Soulseek username (optional if configured)")
-	passEntry := widget.NewPasswordEntry()
+	passEntry = widget.NewPasswordEntry()
 	passEntry.SetPlaceHolder("Soulseek password")
-
 	advanced := widget.NewAccordion(widget.NewAccordionItem("Soulseek account",
 		container.NewVBox(widget.NewLabel("Leave empty to use ~/.config/sockseek/sockseek.conf"), userEntry, passEntry)))
-
-	logEntry = widget.NewMultiLineEntry()
-	logEntry.Wrapping = fyne.TextWrapWord
-	logEntry.TextStyle = fyne.TextStyle{Monospace: true}
-	logEntry.Disable()
-	logScroll = container.NewScroll(logEntry)
-	logScroll.SetMinSize(fyne.NewSize(720, 300))
-
-	progress := widget.NewProgressBar()
-	progress.Hide()
-
-	statusLabel := widget.NewLabel("Ready")
-
-	var cancel context.CancelFunc
 
 	browseBtn := widget.NewButtonWithIcon("", theme.FolderOpenIcon(), func() {
 		d := dialog.NewFolderOpen(func(lu fyne.ListableURI, err error) {
@@ -101,100 +102,127 @@ func main() {
 		d.Show()
 	})
 
-	folderRow := container.NewBorder(nil, nil, nil, browseBtn, outEntry)
-
-	runBtn := widget.NewButtonWithIcon("Download", theme.DownloadIcon(), nil)
-	stopBtn := widget.NewButtonWithIcon("Stop", theme.CancelIcon(), nil)
+	runBtn = widget.NewButtonWithIcon("Download", theme.DownloadIcon(), func() {
+		startRun(strings.TrimSpace(urlEntry.Text), nil)
+	})
+	stopBtn = widget.NewButtonWithIcon("Stop", theme.CancelIcon(), func() {
+		if cancel != nil {
+			cancel()
+			statusLabel.SetText("Stopping...")
+		}
+	})
 	stopBtn.Disable()
 	openBtn := widget.NewButtonWithIcon("Open folder", theme.FolderIcon(), func() {
 		openFolder(outEntry.Text)
 	})
 
-	runBtn.OnTapped = func() {
-		input := strings.TrimSpace(urlEntry.Text)
-		if input == "" {
-			dialog.ShowInformation("Missing link", "Paste a Spotify playlist, album, or track link first.", w)
-			return
-		}
-		dest := strings.TrimSpace(outEntry.Text)
-		if dest == "" {
-			dialog.ShowInformation("Missing folder", "Choose an export folder.", w)
-			return
-		}
-		prefs.SetString("outputDir", dest)
-		prefs.SetString("bitrate", bitrateSel.Selected)
-		prefs.SetBool("fallback", fallbackChk.Checked)
-
-		logMu.Lock()
-		logLines = nil
-		logMu.Unlock()
-		logEntry.SetText("")
-
-		ctx, c := context.WithCancel(context.Background())
-		cancel = c
-
-		runBtn.Disable()
-		stopBtn.Enable()
-		progress.Show()
-		progress.SetValue(0)
-		statusLabel.SetText("Working...")
-
-		opts := &pipeline.Options{
-			Input:        input,
-			OutputDir:    dest,
-			Bitrate:      bitrateSel.Selected,
-			UseFallback:  fallbackChk.Checked,
-			SoulseekUser: strings.TrimSpace(userEntry.Text),
-			SoulseekPass: passEntry.Text,
-			Log:          addLog,
-		}
-
-		go func() {
-			res, err := pipeline.Run(ctx, opts)
-			fyne.Do(func() {
-				progress.Hide()
-				runBtn.Enable()
-				stopBtn.Disable()
-				if err != nil {
-					statusLabel.SetText("Failed")
-					addLog("ERROR: " + err.Error())
-					dialog.ShowError(err, w)
-					return
-				}
-				_ = pipeline.WriteReport(res)
-				statusLabel.SetText(fmt.Sprintf("Done: %d/%d tracks, %d files", res.Files, res.Total, res.Files))
-				dialog.ShowInformation("Done",
-					fmt.Sprintf("%d of %d tracks saved to\n%s", res.Files, res.Total, res.OutputDir), w)
-			})
-		}()
-	}
-
-	stopBtn.OnTapped = func() {
-		if cancel != nil {
-			cancel()
-			statusLabel.SetText("Stopping...")
-		}
-	}
-
-	top := container.NewVBox(
-		widget.NewLabelWithStyle("Spotseek", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		widget.NewLabel("Download a public Spotify playlist, album, or track as mp3."),
-		widget.NewSeparator(),
-		widget.NewLabel("Spotify link"),
+	linkTab := container.NewVBox(
+		widget.NewLabel("Download from a link"),
 		urlEntry,
 		widget.NewLabel("Export folder"),
-		folderRow,
+		container.NewBorder(nil, nil, nil, browseBtn, outEntry),
 		container.NewGridWithColumns(2,
 			container.NewVBox(widget.NewLabel("Quality (mp3)"), bitrateSel),
 			container.NewVBox(widget.NewLabel(""), fallbackChk),
 		),
 		advanced,
-		container.NewHBox(runBtn, stopBtn, openBtn, statusLabel),
-		progress,
-		widget.NewLabel("Log"),
+		container.NewHBox(runBtn, stopBtn, openBtn),
 	)
 
-	w.SetContent(container.NewBorder(top, nil, nil, nil, logScroll))
+	// My Spotify tab
+	spotifyHost = container.NewVBox()
+	clientEntry := widget.NewEntry()
+	clientEntry.SetText(prefs.StringWithFallback("spotifyClientID", ""))
+	clientEntry.SetPlaceHolder("Spotify app Client ID")
+	clientHelp := widget.NewLabel("Create an app at developer.spotify.com/dashboard.\n" +
+		"Add this exact Redirect URI:  " + spotify.RedirectURL() + "\n" +
+		"Then paste the Client ID here and click Connect. The app only reads your library.")
+	clientHelp.Wrapping = fyne.TextWrapWord
+	var refreshSpotify func()
+	var connectBtn *widget.Button
+	connectBtn = widget.NewButtonWithIcon("Connect Spotify", theme.LoginIcon(), func() {
+		cid := strings.TrimSpace(clientEntry.Text)
+		if cid == "" {
+			dialog.ShowInformation("Client ID needed", "Paste your Spotify app Client ID first.", w)
+			return
+		}
+		prefs.SetString("spotifyClientID", cid)
+		auth = spotify.NewAuth(cid)
+		connectBtn.Disable()
+		statusLabel.SetText("Waiting for Spotify login...")
+		go func() {
+			err := auth.Login(context.Background(), func(u string) error {
+				parsed, perr := url.Parse(u)
+				if perr != nil {
+					return perr
+				}
+				fyne.DoAndWait(func() { _ = fyne.CurrentApp().OpenURL(parsed) })
+				return nil
+			})
+			fyne.Do(func() {
+				connectBtn.Enable()
+				if err != nil {
+					addLog("Spotify login failed: " + err.Error())
+					dialog.ShowError(err, w)
+					statusLabel.SetText("Spotify login failed")
+					return
+				}
+				addLog("Connected to Spotify (read-only).")
+				statusLabel.SetText("Connected to Spotify")
+				refreshSpotify()
+			})
+		}()
+	})
+
+	// restore a previous session
+	if cid := prefs.String("spotifyClientID"); cid != "" {
+		auth = spotify.NewAuth(cid)
+	}
+
+	refreshSpotify = func() {
+		spotifyHost.Objects = nil
+		if auth == nil || !auth.LoggedIn() {
+			spotifyHost.Add(container.NewVBox(
+				widget.NewLabelWithStyle("Connect your Spotify account", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+				clientHelp,
+				widget.NewLabel("Client ID"),
+				clientEntry,
+				connectBtn,
+			))
+		} else {
+			spotifyHost.Add(buildLibraryUI(prefs, w))
+		}
+		spotifyHost.Refresh()
+	}
+	refreshSpotify()
+
+	spotifyTab := container.NewVScroll(spotifyHost)
+
+	tabs := container.NewAppTabs(
+		container.NewTabItemWithIcon("Download", theme.DownloadIcon(), linkTab),
+		container.NewTabItemWithIcon("My Spotify", theme.AccountIcon(), spotifyTab),
+	)
+
+	// Log and progress at the bottom, shared by both tabs.
+	logEntry = widget.NewMultiLineEntry()
+	logEntry.Wrapping = fyne.TextWrapWord
+	logEntry.TextStyle = fyne.TextStyle{Monospace: true}
+	logEntry.Disable()
+	logScroll = container.NewScroll(logEntry)
+	progress = widget.NewProgressBar()
+	progress.Hide()
+	statusLabel = widget.NewLabel("Ready")
+
+	bottom := container.NewVBox(
+		container.NewHBox(progress, statusLabel),
+		widget.NewLabel("Log"),
+		logScroll,
+	)
+	logScroll.SetMinSize(fyne.NewSize(800, 220))
+
+	split := container.NewVSplit(tabs, bottom)
+	split.SetOffset(0.62)
+	w.SetContent(split)
 	w.Show()
 
 	go func() {
@@ -209,8 +237,6 @@ func main() {
 					return
 				}
 				logEntry.SetText(text)
-				// ScrollToBottom uses the laid-out content height, so it must run
-				// after the new text has been through a layout pass.
 				time.AfterFunc(40*time.Millisecond, func() {
 					fyne.Do(func() { logScroll.ScrollToBottom() })
 				})
@@ -219,6 +245,187 @@ func main() {
 	}()
 
 	a.Run()
+}
+
+// startRun validates the inputs and runs the pipeline in the background.
+func startRun(input string, coll *spotify.Collection) {
+	if input == "" && coll == nil {
+		dialog.ShowInformation("Missing link", "Paste a Spotify playlist, album, or track link first.", mainWindow)
+		return
+	}
+	dest := strings.TrimSpace(outEntry.Text)
+	if dest == "" {
+		dialog.ShowInformation("Missing folder", "Choose an export folder.", mainWindow)
+		return
+	}
+
+	logMu.Lock()
+	logLines = nil
+	logMu.Unlock()
+	logEntry.SetText("")
+
+	ctx, c := context.WithCancel(context.Background())
+	cancel = c
+
+	runBtn.Disable()
+	stopBtn.Enable()
+	progress.Show()
+	progress.SetValue(0)
+	statusLabel.SetText("Working...")
+
+	opts := &pipeline.Options{
+		Input:        input,
+		Collection:   coll,
+		OutputDir:    dest,
+		Bitrate:      bitrateSel.Selected,
+		UseFallback:  fallbackChk.Checked,
+		SoulseekUser: strings.TrimSpace(userEntry.Text),
+		SoulseekPass: passEntry.Text,
+		Log:          addLog,
+	}
+
+	go func() {
+		res, err := pipeline.Run(ctx, opts)
+		fyne.Do(func() {
+			progress.Hide()
+			runBtn.Enable()
+			stopBtn.Disable()
+			if err != nil {
+				statusLabel.SetText("Failed")
+				addLog("ERROR: " + err.Error())
+				dialog.ShowError(err, mainWindow)
+				return
+			}
+			_ = pipeline.WriteReport(res)
+			statusLabel.SetText(fmt.Sprintf("Done: %d files", res.Files))
+			dialog.ShowInformation("Done",
+				fmt.Sprintf("%d of %d tracks saved to\n%s", res.Files, res.Total, res.OutputDir), mainWindow)
+		})
+	}()
+}
+
+func buildLibraryUI(prefs fyne.Preferences, w fyne.Window) fyne.CanvasObject {
+	profileLabel := widget.NewLabel("Loading...")
+	disconnect := widget.NewButtonWithIcon("Disconnect", theme.LogoutIcon(), func() {
+		if auth != nil {
+			auth.Logout()
+		}
+		addLog("Disconnected from Spotify.")
+		refreshSpotifyTab()
+	})
+
+	playlistsBox := container.NewVBox(widget.NewLabel("Loading playlists..."))
+	albumsBox := container.NewVBox(widget.NewLabel("Loading albums..."))
+	likedBox := container.NewVBox(widget.NewLabel("Loading liked songs..."))
+
+	go func() {
+		ctx := context.Background()
+		name, _ := auth.Profile(ctx)
+		playlists, errP := auth.Playlists(ctx)
+		albums, errA := auth.Albums(ctx)
+		liked, errL := auth.LikedTracks(ctx)
+		fyne.Do(func() {
+			if name != "" {
+				profileLabel.SetText("Signed in as " + name)
+			}
+			fillItems(playlistsBox, playlists, errP)
+			fillItems(albumsBox, albums, errA)
+			fillLiked(likedBox, liked, errL)
+		})
+	}()
+
+	tabs := container.NewAppTabs(
+		container.NewTabItem("Playlists", container.NewVScroll(playlistsBox)),
+		container.NewTabItem("Albums", container.NewVScroll(albumsBox)),
+		container.NewTabItem("Liked Songs", container.NewVScroll(likedBox)),
+	)
+	header := container.NewBorder(nil, nil, nil, disconnect, profileLabel)
+	return container.NewBorder(header, nil, nil, nil, tabs)
+}
+
+func fillItems(box *fyne.Container, items []spotify.LibraryItem, err error) {
+	box.Objects = nil
+	if err != nil {
+		box.Add(widget.NewLabel("Could not load: " + err.Error()))
+		box.Refresh()
+		return
+	}
+	if len(items) == 0 {
+		box.Add(widget.NewLabel("Nothing here"))
+		box.Refresh()
+		return
+	}
+	for _, it := range items {
+		item := it
+		label := widget.NewLabel(fmt.Sprintf("%s\n%s · %d tracks", item.Name, item.Subtitle, item.Count))
+		btn := widget.NewButtonWithIcon("Download", theme.DownloadIcon(), func() {
+			downloadLibraryItem(item)
+		})
+		box.Add(container.NewBorder(nil, nil, nil, btn, label))
+	}
+	box.Refresh()
+}
+
+func fillLiked(box *fyne.Container, tracks []spotify.Track, err error) {
+	box.Objects = nil
+	if err != nil {
+		box.Add(widget.NewLabel("Could not load: " + err.Error()))
+		box.Refresh()
+		return
+	}
+	label := widget.NewLabel(fmt.Sprintf("Liked Songs\n%d tracks", len(tracks)))
+	btn := widget.NewButtonWithIcon("Download all", theme.DownloadIcon(), func() {
+		if len(tracks) == 0 {
+			return
+		}
+		startRun("", &spotify.Collection{Kind: "playlist", Name: "Liked Songs", Tracks: tracks})
+	})
+	box.Add(container.NewBorder(nil, nil, nil, btn, label))
+	box.Refresh()
+}
+
+// downloadLibraryItem fetches the tracks of a playlist or album, then runs the pipeline.
+func downloadLibraryItem(item spotify.LibraryItem) {
+	statusLabel.SetText("Loading " + item.Name + "...")
+	go func() {
+		ctx := context.Background()
+		var coll *spotify.Collection
+		var err error
+		if item.Kind == "album" {
+			var tracks []spotify.Track
+			tracks, err = auth.AlbumTracks(ctx, item.ID)
+			coll = &spotify.Collection{Kind: "album", Name: item.Name, Artist: item.Subtitle, Tracks: tracks}
+		} else {
+			var tracks []spotify.Track
+			tracks, err = auth.PlaylistTracks(ctx, item.ID)
+			coll = &spotify.Collection{Kind: "playlist", Name: item.Name, Tracks: tracks}
+		}
+		fyne.Do(func() {
+			if err != nil {
+				statusLabel.SetText("Failed to load " + item.Name)
+				dialog.ShowError(err, mainWindow)
+				return
+			}
+			if len(coll.Tracks) == 0 {
+				dialog.ShowInformation("Empty", item.Name+" has no tracks.", mainWindow)
+				return
+			}
+			startRun("", coll)
+		})
+	}()
+}
+
+func refreshSpotifyTab() {
+	// Rebuild the My Spotify tab after a login or logout.
+	if auth == nil || !auth.LoggedIn() {
+		spotifyHost.Objects = nil
+		spotifyHost.Add(widget.NewLabel("Reopen the app to connect."))
+		spotifyHost.Refresh()
+		return
+	}
+	spotifyHost.Objects = nil
+	spotifyHost.Add(buildLibraryUI(fyne.CurrentApp().Preferences(), mainWindow))
+	spotifyHost.Refresh()
 }
 
 func homeDir() string {
