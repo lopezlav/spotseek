@@ -52,6 +52,9 @@ type playlistsPage struct {
 		Owner struct {
 			DisplayName string `json:"display_name"`
 		} `json:"owner"`
+		// Spotify renamed "tracks" to "items" (February 2026). "items" is
+		// absent for playlists the user does not own or collaborate on.
+		Items  *struct{ Total int `json:"total"` } `json:"items"`
 		Tracks struct {
 			Total int `json:"total"`
 		} `json:"tracks"`
@@ -72,11 +75,15 @@ func (a *Auth) Playlists(ctx context.Context) ([]LibraryItem, error) {
 			if p.ID == "" {
 				continue
 			}
+			count := p.Tracks.Total
+			if p.Items != nil {
+				count = p.Items.Total
+			}
 			out = append(out, LibraryItem{
 				ID:       p.ID,
 				Name:     p.Name,
 				Subtitle: p.Owner.DisplayName,
-				Count:    p.Tracks.Total,
+				Count:    count,
 				Kind:     "playlist",
 			})
 		}

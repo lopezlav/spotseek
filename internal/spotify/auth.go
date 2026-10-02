@@ -227,9 +227,17 @@ func (a *Auth) EnsureToken() (string, error) {
 	form.Set("client_id", a.ClientID)
 	tok, err := a.postToken(form)
 	if err != nil {
+		if strings.Contains(err.Error(), "invalid_grant") {
+			a.Logout()
+			return "", errors.New("Spotify session expired. Click Disconnect, then Connect again")
+		}
 		return "", err
 	}
 	a.apply(tok)
+	if tok.RefreshToken != "" {
+		// Spotify can rotate the refresh token. Save the new one.
+		_ = keyring.Set(keyringSvc, keyringUser, tok.RefreshToken)
+	}
 	return a.accessToken, nil
 }
 

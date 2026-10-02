@@ -357,7 +357,11 @@ func fillItems(box *fyne.Container, items []spotify.LibraryItem, err error) {
 	}
 	for _, it := range items {
 		item := it
-		label := widget.NewLabel(fmt.Sprintf("%s\n%s · %d tracks", item.Name, item.Subtitle, item.Count))
+		meta := item.Subtitle
+		if item.Count > 0 {
+			meta = fmt.Sprintf("%s · %d tracks", item.Subtitle, item.Count)
+		}
+		label := widget.NewLabel(fmt.Sprintf("%s\n%s", item.Name, meta))
 		btn := widget.NewButtonWithIcon("Download", theme.DownloadIcon(), func() {
 			downloadLibraryItem(item)
 		})
@@ -398,6 +402,14 @@ func downloadLibraryItem(item spotify.LibraryItem) {
 		} else {
 			var tracks []spotify.Track
 			tracks, err = auth.PlaylistTracks(ctx, item.ID)
+			if err != nil || len(tracks) == 0 {
+				// Spotify returns playlist contents only for playlists the user
+				// owns or collaborates on. Try the public page for the rest.
+				if c, e := spotify.Extract("https://open.spotify.com/playlist/" + item.ID); e == nil {
+					tracks = c.Tracks
+					err = nil
+				}
+			}
 			coll = &spotify.Collection{Kind: "playlist", Name: item.Name, Tracks: tracks}
 		}
 		fyne.Do(func() {
