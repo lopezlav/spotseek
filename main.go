@@ -198,17 +198,22 @@ func main() {
 	w.Show()
 
 	go func() {
-		ticker := time.NewTicker(150 * time.Millisecond)
+		ticker := time.NewTicker(200 * time.Millisecond)
 		defer ticker.Stop()
 		for range ticker.C {
 			logMu.Lock()
 			text := strings.Join(logLines, "\n")
 			logMu.Unlock()
 			fyne.Do(func() {
-				if logEntry.Text != text {
-					logEntry.SetText(text)
-					logScroll.ScrollToBottom()
+				if logEntry.Text == text {
+					return
 				}
+				logEntry.SetText(text)
+				// ScrollToBottom uses the laid-out content height, so it must run
+				// after the new text has been through a layout pass.
+				time.AfterFunc(40*time.Millisecond, func() {
+					fyne.Do(func() { logScroll.ScrollToBottom() })
+				})
 			})
 		}
 	}()
