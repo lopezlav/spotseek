@@ -216,7 +216,7 @@ type playlistItemsPage struct {
 // PlaylistTracks returns all tracks of a playlist (works for private playlists).
 func (a *Auth) PlaylistTracks(ctx context.Context, id string) ([]Track, error) {
 	var out []Track
-	url := fmt.Sprintf("%s/playlists/%s/items?limit=100", apiBase, id)
+	url := fmt.Sprintf("%s/playlists/%s/items?limit=50", apiBase, id)
 	for url != "" {
 		var page playlistItemsPage
 		if err := a.get(ctx, url, &page); err != nil {

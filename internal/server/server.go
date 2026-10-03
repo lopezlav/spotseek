@@ -16,7 +16,7 @@ import (
 )
 
 // Version is the server version, reported by /health.
-const Version = "1.4.0"
+const Version = "1.5.0"
 
 // logf adapts log.Print to the func(string) logger used by the index.
 func logf(msg string) { log.Print(msg) }
@@ -34,6 +34,7 @@ type Server struct {
 	ctx             context.Context
 	metadata        *metadataCache
 	source          metadataSource
+	catalog         *catalogService
 	accountID       string
 	accountSession  string
 	identityAttempt time.Time
@@ -66,6 +67,7 @@ func New(ctx context.Context, settings *Settings, auth *spotify.Auth) (*Server, 
 		ctx:      ctx,
 		metadata: cache,
 		source:   auth,
+		catalog:  newCatalogService(auth),
 	}
 	s.startIndexScan()
 	return s, nil
@@ -89,6 +91,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/login", s.handleLogin)
 	mux.HandleFunc("POST /api/v1/auth/logout", s.handleLogout)
 	mux.HandleFunc("GET /api/v1/library", s.handleLibrary)
+	mux.HandleFunc("GET /api/v1/catalog/search", s.handleSearch)
+	mux.HandleFunc("GET /api/v1/catalog/downloaded", s.handleDownloaded)
 	mux.HandleFunc("GET /api/v1/artists/{id}/albums", s.handleArtistAlbums)
 	mux.HandleFunc("GET /api/v1/collections/{kind}/{id}/tracks", s.handleCollectionTracks)
 	mux.HandleFunc("POST /api/v1/extract", s.handleExtract)

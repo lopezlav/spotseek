@@ -99,6 +99,37 @@ Spotseek.app/Contents/MacOS/spotseek-app --cli "<spotify-url>" -o <dir>
 
 Options: `--bitrate 320`, `--no-fallback`, `--limit N`, `--extract-only`.
 
+<!-- AI-assisted documentation begins. -->
+## Mixxx server and catalogue search
+
+Run `spotseek-app serve` to start the local service on `127.0.0.1:8765`.
+The Mixxx Spotify feature uses the service for login, metadata, file lookup,
+and downloads. The service does not open the Mixxx database.
+
+- `GET /api/v1/catalog/search?q=...&type=track|album|artist&offset=...`
+  returns one page of up to 10 results and `next_offset`. An offset of `-1`
+  means there are no more results. Set `refresh=1` to fetch again.
+- `GET /api/v1/catalog/downloaded` returns all saved completed assets for the
+  active account. Each asset has track metadata, a file path, and its update time.
+
+`internal/spotify/catalog.go` defines typed search requests, result pages, and
+safe Spotify API errors. `internal/server/catalog.go` separates catalogue reads
+from saved-library sync. Its cache holds up to 128 pages for five minutes and
+keeps accounts separate. A canceled HTTP search cancels the Spotify read. A
+rate limit returns `code: rate_limited`, a retry time, and the `Retry-After`
+header. Login, access, and timeout errors have short messages.
+
+The service saves completed assets in `.spotseek/jobs.json`. Assets stay after
+old job records are removed. Existing successful jobs migrate at startup.
+A failed retry does not remove a completed asset. Search downloads go into the
+`Search` folder under the configured music folder. Other downloads keep their
+collection folder. Mixxx builds its Downloaded list from these assets and local
+links, so the list can open without the server.
+
+Checks: `go test ./...`, `go vet ./...`, and
+`go test -race ./internal/server ./internal/spotify ./internal/libraryindex`.
+<!-- AI-assisted documentation ends. -->
+
 ## Layout
 
 - `internal/spotify` - reads playlist, album, and track metadata from public

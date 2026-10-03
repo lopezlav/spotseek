@@ -126,7 +126,7 @@ func (s *Server) writeMetadata(w http.ResponseWriter, r *http.Request, kind, id 
 		err = fmt.Errorf("Spotify login changed during the request")
 	}
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error(), "complete": false, "account_id": ""})
+		writeCatalogError(w, err, "")
 		return
 	}
 	force := r.URL.Query().Get("refresh") == "1"
@@ -141,7 +141,7 @@ func (s *Server) writeMetadata(w http.ResponseWriter, r *http.Request, kind, id 
 		return data, err
 	}, r.Context())
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error(), "complete": false, "account_id": identity.ID})
+		writeCatalogError(w, err, identity.ID)
 		return
 	}
 	var response map[string]any

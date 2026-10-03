@@ -59,6 +59,7 @@ type Manager struct {
 	mu            sync.Mutex
 	ctx           context.Context
 	jobs          map[string]*Job
+	downloads     map[string]DownloadedTrack
 	order         []string
 	active        map[string]string // track key -> job id
 	queue         chan string
@@ -85,14 +86,15 @@ const soulseekCooldown = 15 * time.Minute
 // NewManager starts the worker pool.
 func NewManager(ctx context.Context, settings *Settings, index *libraryindex.Index) *Manager {
 	m := &Manager{
-		ctx:      ctx,
-		jobs:     make(map[string]*Job),
-		active:   make(map[string]string),
-		queue:    make(chan string, 10000),
-		settings: settings,
-		index:    index,
-		dirty:    make(chan struct{}, 1),
-		epoch:    randomID(16),
+		ctx:       ctx,
+		jobs:      make(map[string]*Job),
+		downloads: make(map[string]DownloadedTrack),
+		active:    make(map[string]string),
+		queue:     make(chan string, 10000),
+		settings:  settings,
+		index:     index,
+		dirty:     make(chan struct{}, 1),
+		epoch:     randomID(16),
 	}
 	if err := m.restore(); err != nil {
 		log.Printf("jobs: cannot restore saved downloads: %v", err)
@@ -139,6 +141,9 @@ func trackKey(t spotify.Track) string {
 }
 
 func scopeFolder(name, kind string) string {
+	if kind == "search" {
+		return "Search"
+	}
 	if kind == "track" || strings.TrimSpace(name) == "" {
 		return "Singles"
 	}
@@ -157,6 +162,7 @@ func (m *Manager) nextSeqLocked() uint64 {
 func (m *Manager) touchLocked(j *Job) {
 	j.changeSeq = m.nextSeqLocked()
 	j.UpdatedAt = time.Now()
+	m.rememberDownloadLocked(j)
 	m.markDirtyLocked()
 }
 
@@ -650,8 +656,9 @@ func (m *Manager) SetAccount(accountID string) {
 }
 
 type savedJobs struct {
-	Version int   `json:"version"`
-	Jobs    []Job `json:"jobs"`
+	Version   int               `json:"version"`
+	Jobs      []Job             `json:"jobs"`
+	Downloads []DownloadedTrack `json:"downloads,omitempty"`
 }
 
 func (m *Manager) restore() error {
@@ -670,6 +677,9 @@ func (m *Manager) restore() error {
 	if saved.Version != 1 {
 		return fmt.Errorf("unsupported download history version %d", saved.Version)
 	}
+	for _, asset := range saved.Downloads {
+		m.downloads[accountTrackKey(asset.AccountID, asset.Track.toTrack())] = asset
+	}
 	for _, job := range saved.Jobs {
 		if job.ID == "" || m.jobs[job.ID] != nil {
 			continue
@@ -683,6 +693,7 @@ func (m *Manager) restore() error {
 		job.changeSeq = m.nextSeqLocked()
 		m.jobs[job.ID] = copyJob(&job)
 		m.order = append(m.order, job.ID)
+		m.rememberDownloadLocked(&job)
 	}
 	return nil
 }
@@ -733,6 +744,9 @@ func (m *Manager) Flush() error {
 		if job := m.jobs[id]; job != nil {
 			saved.Jobs = append(saved.Jobs, *copyJob(job))
 		}
+	}
+	for _, asset := range m.downloads {
+		saved.Downloads = append(saved.Downloads, asset)
 	}
 	m.mu.Unlock()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

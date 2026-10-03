@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -336,6 +337,11 @@ func (a *Auth) ensureTokenContext(ctx context.Context) (string, error) {
 
 // get performs an authenticated GET and decodes the JSON body.
 func (a *Auth) get(ctx context.Context, url string, out any) error {
+	return a.getWithRetry(ctx, url, out, true)
+}
+
+// AI-assisted code: retry one rejected access token through the shared refresh.
+func (a *Auth) getWithRetry(ctx context.Context, url string, out any, retry bool) error {
 	token, err := a.ensureTokenContext(ctx)
 	if err != nil {
 		return err
@@ -350,15 +356,29 @@ func (a *Auth) get(ctx context.Context, url string, out any) error {
 		return err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	if readErr != nil {
+		return readErr
+	}
 	if resp.StatusCode == 401 {
 		a.mu.Lock()
-		a.accessToken = ""
+		if a.accessToken == token {
+			a.accessToken = ""
+		}
 		a.mu.Unlock()
-		return errors.New("spotify token expired, try again")
+		if retry {
+			return a.getWithRetry(ctx, url, out, false)
+		}
+		return &APIError{Status: resp.StatusCode}
 	}
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("spotify API HTTP %d for %s: %s", resp.StatusCode, url, string(body))
+		retry, _ := strconv.Atoi(resp.Header.Get("Retry-After"))
+		if retry < 1 {
+			retry = 30
+		}
+		return &APIError{Status: resp.StatusCode, RetryAfter: retry, Playlist: strings.Contains(url, "/playlists/")}
 	}
 	return json.Unmarshal(body, out)
 }
+
+// End AI-assisted code.
