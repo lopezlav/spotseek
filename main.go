@@ -4,13 +4,16 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log"
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -22,6 +25,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"spotseek-app/internal/pipeline"
+	"spotseek-app/internal/server"
 	"spotseek-app/internal/spotify"
 )
 
@@ -31,20 +35,20 @@ var (
 	logEntry  *widget.Entry
 	logScroll *container.Scroll
 
-	auth         *spotify.Auth
-	spotifyHost  *fyne.Container
+	auth           *spotify.Auth
+	spotifyHost    *fyne.Container
 	refreshSpotify func()
-	outEntry     *widget.Entry
-	bitrateSel   *widget.Select
-	fallbackChk  *widget.Check
-	userEntry    *widget.Entry
-	passEntry    *widget.Entry
-	runBtn       *widget.Button
-	stopBtn      *widget.Button
-	progress     *widget.ProgressBar
-	statusLabel  *widget.Label
-	cancel       context.CancelFunc
-	mainWindow   fyne.Window
+	outEntry       *widget.Entry
+	bitrateSel     *widget.Select
+	fallbackChk    *widget.Check
+	userEntry      *widget.Entry
+	passEntry      *widget.Entry
+	runBtn         *widget.Button
+	stopBtn        *widget.Button
+	progress       *widget.ProgressBar
+	statusLabel    *widget.Label
+	cancel         context.CancelFunc
+	mainWindow     fyne.Window
 )
 
 func addLog(s string) {
@@ -58,6 +62,10 @@ func addLog(s string) {
 
 func main() {
 	ensurePath()
+	if len(os.Args) > 1 && os.Args[1] == "serve" {
+		runServe(os.Args[2:])
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "--cli" {
 		runCLI(os.Args[2:])
 		return
@@ -562,4 +570,58 @@ func runCLI(args []string) {
 	}
 	_ = pipeline.WriteReport(res)
 	fmt.Printf("Done: %d files in %s\n", res.Files, res.OutputDir)
+}
+
+// runServe starts the headless server that Mixxx talks to.
+func runServe(args []string) {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	addr := fs.String("addr", "", "listen address (default 127.0.0.1:8765)")
+	output := fs.String("output", "", "music folder for downloaded files")
+	concurrency := fs.Int("concurrency", 0, "parallel downloads (1-8)")
+	clientID := fs.String("client-id", "", "Spotify app client id")
+	_ = fs.Parse(args)
+
+	settings, err := server.LoadSettings()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "cannot read settings:", err)
+		os.Exit(1)
+	}
+	if *addr != "" {
+		settings.Addr = *addr
+	}
+	if *output != "" {
+		settings.OutputDir = *output
+	}
+	if *concurrency > 0 {
+		settings.Concurrency = *concurrency
+	}
+	if *clientID != "" {
+		settings.ClientID = *clientID
+	}
+	if env := strings.TrimSpace(os.Getenv("SPOTIFY_CLIENT_ID")); env != "" && settings.ClientID == "" {
+		settings.ClientID = env
+	}
+
+	auth := spotify.NewAuth(settings.ClientID)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	srv, err := server.New(ctx, settings, auth)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "cannot start server:", err)
+		os.Exit(1)
+	}
+	log.Printf("Spotseek server %s", server.Version)
+	log.Printf("Listening on http://%s", settings.Addr)
+	log.Printf("Music folder: %s", settings.OutputDir)
+	if auth.LoggedIn() {
+		log.Printf("Spotify: connected (stored token found)")
+	} else {
+		log.Printf("Spotify: not connected. Use the Mixxx Spotify pane to log in.")
+	}
+	if err := srv.Run(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, "server error:", err)
+		os.Exit(1)
+	}
+	log.Printf("Server stopped")
 }

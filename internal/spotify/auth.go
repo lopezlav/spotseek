@@ -25,26 +25,48 @@ const (
 	apiBase     = "https://api.spotify.com/v1"
 	redirectURI = "http://127.0.0.1:48721/callback"
 	// Read-only scopes. The app never writes to your Spotify account.
-	scopes        = "playlist-read-private playlist-read-collaborative user-library-read user-read-private"
-	keyringSvc    = "spotseek"
-	keyringUser   = "spotify-refresh-token"
-	callbackHTML  = `<html><body style="font-family:sans-serif;background:#121212;color:#fff;text-align:center;padding-top:80px"><h2>Spotseek is connected</h2><p>You can close this window and return to the app.</p></body></html>`
+	scopes       = "playlist-read-private playlist-read-collaborative user-library-read user-read-private user-follow-read"
+	keyringSvc   = "spotseek"
+	keyringUser  = "spotify-refresh-token"
+	callbackHTML = `<html><body style="font-family:sans-serif;background:#121212;color:#fff;text-align:center;padding-top:80px"><h2>Spotseek is connected</h2><p>You can close this window and return to the app.</p></body></html>`
 )
 
 // Auth holds the Spotify OAuth (PKCE) state for one user.
 type Auth struct {
-	ClientID     string
-	RedirectURI  string
-	accessToken  string
-	refreshToken string
-	expiresAt    time.Time
-	mu           sync.Mutex
+	ClientID       string
+	RedirectURI    string
+	accessToken    string
+	refreshToken   string
+	expiresAt      time.Time
+	mu             sync.Mutex
+	sessionVersion uint64
+	refreshing     chan struct{}
 }
 
 // NewAuth creates an Auth. The client id comes from your Spotify developer app.
 func NewAuth(clientID string) *Auth {
 	return &Auth{ClientID: strings.TrimSpace(clientID), RedirectURI: redirectURI}
 }
+
+// AI-assisted code: use the same lock for client changes and token refresh.
+func (a *Auth) SetClientID(clientID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	next := strings.TrimSpace(clientID)
+	if a.ClientID != next {
+		a.sessionVersion++
+		a.accessToken = ""
+	}
+	a.ClientID = next
+}
+
+func (a *Auth) SessionVersion() uint64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.sessionVersion
+}
+
+// End AI-assisted code.
 
 // RedirectURL is the loopback redirect URI to register in your Spotify app.
 func RedirectURL() string { return redirectURI }
@@ -56,6 +78,8 @@ func LoadStoredRefresh() (string, error) {
 
 // LoggedIn reports whether a refresh token is stored.
 func (a *Auth) LoggedIn() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if a.refreshToken != "" {
 		return true
 	}
@@ -67,8 +91,36 @@ func (a *Auth) LoggedIn() bool {
 	return false
 }
 
+// AI-assisted code: bind saved account metadata to the current login without saving a token.
+func (a *Auth) CacheKey() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.ClientID == "" {
+		return ""
+	}
+	if a.refreshToken == "" {
+		if token, err := LoadStoredRefresh(); err == nil {
+			a.refreshToken = token
+		}
+	}
+	if a.refreshToken == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(a.ClientID + "\x00" + a.refreshToken))
+	return fmt.Sprintf("%x", sum)
+}
+
+// End AI-assisted code.
+
 // Logout removes the stored refresh token.
 func (a *Auth) Logout() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.logoutLocked()
+}
+
+func (a *Auth) logoutLocked() {
+	a.sessionVersion++
 	a.refreshToken = ""
 	a.accessToken = ""
 	a.expiresAt = time.Time{}
@@ -98,7 +150,10 @@ type tokenResponse struct {
 // Login runs the Authorization Code with PKCE flow. It opens the browser,
 // waits for the loopback redirect, and stores the refresh token.
 func (a *Auth) Login(ctx context.Context, openURL func(string) error) error {
-	if a.ClientID == "" {
+	a.mu.Lock()
+	clientID, redirect := a.ClientID, a.RedirectURI
+	a.mu.Unlock()
+	if clientID == "" {
 		return errors.New("a Spotify client id is required")
 	}
 	verifier, err := randomURLSafe(64)
@@ -137,9 +192,9 @@ func (a *Auth) Login(ctx context.Context, openURL func(string) error) error {
 	defer srv.Shutdown(context.Background())
 
 	q := url.Values{}
-	q.Set("client_id", a.ClientID)
+	q.Set("client_id", clientID)
 	q.Set("response_type", "code")
-	q.Set("redirect_uri", a.RedirectURI)
+	q.Set("redirect_uri", redirect)
 	q.Set("scope", scopes)
 	q.Set("state", state)
 	q.Set("code_challenge_method", "S256")
@@ -162,14 +217,17 @@ func (a *Auth) Login(ctx context.Context, openURL func(string) error) error {
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)
-	form.Set("redirect_uri", a.RedirectURI)
-	form.Set("client_id", a.ClientID)
+	form.Set("redirect_uri", redirect)
+	form.Set("client_id", clientID)
 	form.Set("code_verifier", verifier)
-	tok, err := a.postToken(form)
+	tok, err := a.postTokenContext(ctx, form)
 	if err != nil {
 		return err
 	}
+	a.mu.Lock()
+	a.sessionVersion++
 	a.apply(tok)
+	a.mu.Unlock()
 	if tok.RefreshToken != "" {
 		_ = keyring.Set(keyringSvc, keyringUser, tok.RefreshToken)
 	}
@@ -177,7 +235,11 @@ func (a *Auth) Login(ctx context.Context, openURL func(string) error) error {
 }
 
 func (a *Auth) postToken(form url.Values) (*tokenResponse, error) {
-	req, err := http.NewRequest("POST", tokenURL, strings.NewReader(form.Encode()))
+	return a.postTokenContext(context.Background(), form)
+}
+
+func (a *Auth) postTokenContext(ctx context.Context, form url.Values) (*tokenResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, "POST", tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, err
 	}
@@ -208,42 +270,73 @@ func (a *Auth) apply(tok *tokenResponse) {
 
 // EnsureToken returns a valid access token, refreshing it when needed.
 func (a *Auth) EnsureToken() (string, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.accessToken != "" && time.Now().Before(a.expiresAt) {
+	return a.ensureTokenContext(context.Background())
+}
+
+// AI-assisted code: a slow token refresh must not block reads of the saved account key.
+func (a *Auth) ensureTokenContext(ctx context.Context) (string, error) {
+	for {
+		a.mu.Lock()
+		if a.accessToken != "" && time.Now().Before(a.expiresAt) {
+			token := a.accessToken
+			a.mu.Unlock()
+			return token, nil
+		}
+		if active := a.refreshing; active != nil {
+			a.mu.Unlock()
+			select {
+			case <-active:
+				continue
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+		}
+		flight := make(chan struct{})
+		a.refreshing = flight
+		if a.refreshToken == "" {
+			if token, err := LoadStoredRefresh(); err == nil {
+				a.refreshToken = token
+			}
+		}
+		if a.refreshToken == "" {
+			close(flight)
+			a.refreshing = nil
+			a.mu.Unlock()
+			return "", errors.New("not connected to Spotify")
+		}
+		refresh, clientID, version := a.refreshToken, a.ClientID, a.sessionVersion
+		a.mu.Unlock()
+		form := url.Values{}
+		form.Set("grant_type", "refresh_token")
+		form.Set("refresh_token", refresh)
+		form.Set("client_id", clientID)
+		tok, err := a.postTokenContext(ctx, form)
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		defer func() { close(flight); a.refreshing = nil }()
+		if version != a.sessionVersion {
+			return "", errors.New("Spotify login changed during token refresh")
+		}
+		if err != nil {
+			if strings.Contains(err.Error(), "invalid_grant") {
+				a.logoutLocked()
+				return "", errors.New("Spotify session expired. Click Disconnect, then Connect again")
+			}
+			return "", err
+		}
+		a.apply(tok)
+		if tok.RefreshToken != "" {
+			_ = keyring.Set(keyringSvc, keyringUser, tok.RefreshToken)
+		}
 		return a.accessToken, nil
 	}
-	if a.refreshToken == "" {
-		if t, err := LoadStoredRefresh(); err == nil {
-			a.refreshToken = t
-		}
-	}
-	if a.refreshToken == "" {
-		return "", errors.New("not connected to Spotify")
-	}
-	form := url.Values{}
-	form.Set("grant_type", "refresh_token")
-	form.Set("refresh_token", a.refreshToken)
-	form.Set("client_id", a.ClientID)
-	tok, err := a.postToken(form)
-	if err != nil {
-		if strings.Contains(err.Error(), "invalid_grant") {
-			a.Logout()
-			return "", errors.New("Spotify session expired. Click Disconnect, then Connect again")
-		}
-		return "", err
-	}
-	a.apply(tok)
-	if tok.RefreshToken != "" {
-		// Spotify can rotate the refresh token. Save the new one.
-		_ = keyring.Set(keyringSvc, keyringUser, tok.RefreshToken)
-	}
-	return a.accessToken, nil
 }
+
+// End AI-assisted code.
 
 // get performs an authenticated GET and decodes the JSON body.
 func (a *Auth) get(ctx context.Context, url string, out any) error {
-	token, err := a.EnsureToken()
+	token, err := a.ensureTokenContext(ctx)
 	if err != nil {
 		return err
 	}
@@ -265,7 +358,7 @@ func (a *Auth) get(ctx context.Context, url string, out any) error {
 		return errors.New("spotify token expired, try again")
 	}
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("spotify API HTTP %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("spotify API HTTP %d for %s: %s", resp.StatusCode, url, string(body))
 	}
 	return json.Unmarshal(body, out)
 }

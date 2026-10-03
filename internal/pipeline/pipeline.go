@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,6 +18,9 @@ import (
 	"spotseek-app/internal/spotify"
 	"spotseek-app/internal/ytdlp"
 )
+
+// errSockseekAborted is returned when AbortSockseekOn stops the process.
+var errSockseekAborted = errors.New("sockseek aborted")
 
 // normTitle lowercases and removes everything except letters and digits, so a
 // track title can be found inside a downloaded file name.
@@ -32,20 +36,27 @@ func normTitle(s string) string {
 
 // Options controls one download run.
 type Options struct {
-	Input         string
-	Collection    *spotify.Collection // if set, Input is ignored
-	OutputDir     string
-	WorkDir       string
-	Bitrate       string // "320", "256", "192", "128"
-	UseFallback   bool
-	MinScore      float64
-	Limit         int
-	SockseekPath  string
-	FfmpegPath    string
-	FfprobePath   string
-	SoulseekUser  string
-	SoulseekPass  string
-	Log           func(string)
+	Input        string
+	Collection   *spotify.Collection // if set, Input is ignored
+	OutputDir    string
+	WorkDir      string
+	ScopeName    string // unique work scope; defaults to the collection name
+	Bitrate      string // "320", "256", "192", "128"
+	UseFallback  bool
+	ProgressJSON bool          // ask sockseek for NDJSON progress events
+	SockseekWait time.Duration // time limit for the Soulseek phase; 0 = no limit
+	SkipSoulseek bool          // go straight to the fallback
+	// AbortSockseekOn stops the sockseek process when a log line matches.
+	// The run then treats every track as missing, like a timeout.
+	AbortSockseekOn func(string) bool
+	MinScore        float64
+	Limit           int
+	SockseekPath    string
+	FfmpegPath      string
+	FfprobePath     string
+	SoulseekUser    string
+	SoulseekPass    string
+	Log             func(string)
 }
 
 // Result summarizes a finished run.
@@ -61,6 +72,14 @@ type missingTrack struct {
 	Artist   string
 	Title    string
 	Duration int
+}
+
+func allMissing(tracks []spotify.Track) []missingTrack {
+	out := make([]missingTrack, 0, len(tracks))
+	for _, t := range tracks {
+		out = append(out, missingTrack{Artist: t.Artist, Title: t.Title, Duration: t.DurationSec})
+	}
+	return out
 }
 
 func (o *Options) log(format string, a ...any) {
@@ -121,21 +140,58 @@ func Run(ctx context.Context, o *Options) (*Result, error) {
 	if safe == "" {
 		safe = "spotify"
 	}
+	if o.ScopeName != "" {
+		safe = ytdlp.SafeName(o.ScopeName)
+		if safe == "" {
+			safe = "spotify"
+		}
+	}
 
 	ssOut := filepath.Join(o.WorkDir, "soulseek")
 	ytOut := filepath.Join(o.WorkDir, "youtube")
 	var missing []missingTrack
 	useAlbumMode := coll.Kind == "album" && coll.Artist != ""
 
+	// The Soulseek phase gets its own time limit. A login problem or a dead
+	// network must not block the YouTube fallback forever.
+	ssCtx := ctx
+	if o.SockseekWait > 0 {
+		var ssCancel context.CancelFunc
+		ssCtx, ssCancel = context.WithTimeout(ctx, o.SockseekWait)
+		defer ssCancel()
+	}
+	sockseekGaveUp := func(err error) bool {
+		if err == nil {
+			return false
+		}
+		if errors.Is(err, errSockseekAborted) {
+			return true
+		}
+		return errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil
+	}
+
 	// 2. Soulseek
-	if useAlbumMode {
+	if o.SkipSoulseek {
+		o.log("Soulseek is marked as unavailable; using the fallback directly")
+		missing = allMissing(tracks)
+		if o.UseFallback {
+			o.log("Trying YouTube Music for all tracks...")
+			fallback(ctx, o, missing, ytOut)
+		}
+	} else if useAlbumMode {
 		// An album is usually shared as one folder. One search finds every track.
 		o.log("Album mode: searching for the album folder...")
-		n, err := runSockseekAlbum(ctx, o, coll.Artist, coll.Name, ssOut)
-		if err != nil {
+		n, err := runSockseekAlbum(ssCtx, o, coll.Artist, coll.Name, ssOut)
+		if sockseekGaveUp(err) {
+			o.log("Soulseek did not answer in %s", o.SockseekWait)
+			missing = allMissing(tracks)
+			if o.UseFallback {
+				o.log("Trying YouTube Music for all tracks...")
+				fallback(ctx, o, missing, ytOut)
+			}
+		} else if err != nil {
 			return nil, err
-		}
-		if n > 0 {
+		} else if n > 0 {
 			o.log("Album folder found: %d audio files", n)
 			var names string
 			for _, f := range walkAudio(ssOut) {
@@ -159,18 +215,23 @@ func Run(ctx context.Context, o *Options) (*Result, error) {
 		}
 	}
 
-	if !useAlbumMode {
+	if !useAlbumMode && len(missing) == 0 {
 		csvPath := filepath.Join(o.WorkDir, safe+".csv")
 		if err := writeTracksCSV(csvPath, tracks); err != nil {
 			return nil, err
 		}
 		o.log("Downloading from Soulseek (mp3, prefer %skbps)...", o.Bitrate)
-		if err := runSockseek(ctx, o, csvPath, ssOut); err != nil {
+		err := runSockseek(ssCtx, o, csvPath, ssOut)
+		if sockseekGaveUp(err) {
+			o.log("Soulseek did not answer in %s", o.SockseekWait)
+			missing = allMissing(tracks)
+		} else if err != nil {
 			return nil, err
+		} else {
+			ssFolder := filepath.Join(ssOut, safe)
+			indexPath := filepath.Join(ssFolder, "_index.csv")
+			missing = readMissing(indexPath, tracks)
 		}
-		ssFolder := filepath.Join(ssOut, safe)
-		indexPath := filepath.Join(ssFolder, "_index.csv")
-		missing = readMissing(indexPath, tracks)
 		if len(missing) > 0 {
 			o.log("%d tracks missing from Soulseek", len(missing))
 		}
@@ -230,7 +291,13 @@ func runStream(ctx context.Context, o *Options, args ...string) error {
 	scan := bufio.NewScanner(stdout)
 	scan.Buffer(make([]byte, 1024*1024), 1024*1024)
 	for scan.Scan() {
-		o.log("%s", scan.Text())
+		line := scan.Text()
+		o.log("%s", line)
+		if o.AbortSockseekOn != nil && o.AbortSockseekOn(line) {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			return errSockseekAborted
+		}
 	}
 	if err := cmd.Wait(); err != nil {
 		if ctx.Err() != nil {
@@ -254,8 +321,16 @@ func sockseekBaseArgs(o *Options) []string {
 	return args
 }
 
+func sockseekProgressArgs(o *Options) []string {
+	if o.ProgressJSON {
+		return []string{"--progress-json"}
+	}
+	return nil
+}
+
 func runSockseek(ctx context.Context, o *Options, csvPath, outDir string) error {
 	args := []string{csvPath, "-o", outDir, "--format", "mp3", "--pref-min-bitrate", o.Bitrate}
+	args = append(args, sockseekProgressArgs(o)...)
 	args = append(args, sockseekBaseArgs(o)...)
 	return runStream(ctx, o, args...)
 }
@@ -267,6 +342,7 @@ func runSockseekAlbum(ctx context.Context, o *Options, artist, album, outDir str
 		query = artist + " - " + album
 	}
 	args := []string{query, "-o", outDir, "--format", "mp3", "--pref-min-bitrate", o.Bitrate}
+	args = append(args, sockseekProgressArgs(o)...)
 	args = append(args, sockseekBaseArgs(o)...)
 	if err := runStream(ctx, o, args...); err != nil {
 		return 0, err
@@ -277,7 +353,9 @@ func runSockseekAlbum(ctx context.Context, o *Options, artist, album, outDir str
 func readMissing(indexPath string, tracks []spotify.Track) []missingTrack {
 	f, err := os.Open(indexPath)
 	if err != nil {
-		return nil
+		// No sockseek result file at all (for example a login failure).
+		// Treat every track as missing so the fallback can run.
+		return allMissing(tracks)
 	}
 	defer f.Close()
 	r := csv.NewReader(f)

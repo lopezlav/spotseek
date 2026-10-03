@@ -18,9 +18,11 @@ const b62Alphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVW
 
 // Track is one song with the data Sockseek needs.
 type Track struct {
-	Artist      string
-	Title       string
-	DurationSec int
+	ID          string `json:"id,omitempty"` // Spotify base62 track id, if known
+	Artist      string `json:"artist,omitempty"`
+	Title       string `json:"title"`
+	Album       string `json:"album,omitempty"`
+	DurationSec int    `json:"duration,omitempty"`
 }
 
 var httpClient = &http.Client{Timeout: 45 * time.Second}
@@ -140,7 +142,7 @@ func trackFromItem(it trackItem) Track {
 	if title == "" {
 		title = it.Name
 	}
-	return Track{Artist: artist, Title: title, DurationSec: it.Duration / 1000}
+	return Track{ID: itemID(it.URI), Artist: artist, Title: title, DurationSec: it.Duration / 1000}
 }
 
 func trackFromEntity(e *entity) Track {
@@ -152,7 +154,7 @@ func trackFromEntity(e *entity) Track {
 	if title == "" {
 		title = e.Title
 	}
-	return Track{Artist: artist, Title: title, DurationSec: e.Duration / 1000}
+	return Track{ID: itemID(e.URI), Artist: artist, Title: title, DurationSec: e.Duration / 1000}
 }
 
 func itemID(uri string) string {
@@ -284,6 +286,13 @@ func playlistTracks(id string) (string, []Track, error) {
 	return name, ordered(byID, ids), nil
 }
 
+func withAlbum(tracks []Track, album string) []Track {
+	for i := range tracks {
+		tracks[i].Album = album
+	}
+	return tracks
+}
+
 func itemOrder(e *entity) []string {
 	var ids []string
 	for _, it := range e.TrackList {
@@ -318,20 +327,20 @@ func albumTracks(id string) (string, string, []Track, error) {
 		}
 	}
 	if token == "" {
-		return name, artist, ordered(byID, itemOrder(e)), nil
+		return name, artist, withAlbum(ordered(byID, itemOrder(e)), name), nil
 	}
 	hexgid, err := b62ToHex(id)
 	if err != nil {
-		return name, artist, ordered(byID, itemOrder(e)), nil
+		return name, artist, withAlbum(ordered(byID, itemOrder(e)), name), nil
 	}
 	raw, err := httpGet("https://spclient.wg.spotify.com/metadata/4/album/"+hexgid,
 		map[string]string{"Authorization": "Bearer " + token, "Accept": "application/json"})
 	if err != nil {
-		return name, artist, ordered(byID, itemOrder(e)), nil
+		return name, artist, withAlbum(ordered(byID, itemOrder(e)), name), nil
 	}
 	var meta albumMeta
 	if err := json.Unmarshal([]byte(raw), &meta); err != nil {
-		return name, artist, ordered(byID, itemOrder(e)), nil
+		return name, artist, withAlbum(ordered(byID, itemOrder(e)), name), nil
 	}
 	var ids []string
 	for _, disc := range meta.Disc {
@@ -350,11 +359,12 @@ func albumTracks(id string) (string, string, []Track, error) {
 	for tid, t := range fetchTracksParallel(missing, 8) {
 		byID[tid] = t
 	}
-	return name, artist, ordered(byID, ids), nil
+	return name, artist, withAlbum(ordered(byID, ids), name), nil
 }
 
 // Collection is a resolved Spotify input.
 type Collection struct {
+	ID     string
 	Kind   string // "playlist", "album", or "track"
 	Name   string
 	Artist string // album artist, used for album-mode search
@@ -373,18 +383,18 @@ func Extract(input string) (*Collection, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &Collection{Kind: "track", Name: t.Title, Artist: t.Artist, Tracks: []Track{t}}, nil
+		return &Collection{ID: id, Kind: "track", Name: t.Title, Artist: t.Artist, Tracks: []Track{t}}, nil
 	case "album":
 		name, artist, tracks, err := albumTracks(id)
 		if err != nil {
 			return nil, err
 		}
-		return &Collection{Kind: "album", Name: name, Artist: artist, Tracks: tracks}, nil
+		return &Collection{ID: id, Kind: "album", Name: name, Artist: artist, Tracks: tracks}, nil
 	default:
 		name, tracks, err := playlistTracks(id)
 		if err != nil {
 			return nil, err
 		}
-		return &Collection{Kind: "playlist", Name: name, Tracks: tracks}, nil
+		return &Collection{ID: id, Kind: "playlist", Name: name, Tracks: tracks}, nil
 	}
 }
