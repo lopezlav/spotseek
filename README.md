@@ -99,6 +99,47 @@ Spotseek.app/Contents/MacOS/spotseek-app --cli "<spotify-url>" -o <dir>
 
 Options: `--bitrate 320`, `--no-fallback`, `--limit N`, `--extract-only`.
 
+Add `--timings` to log JSON `TIMING` records and include stage durations in
+`_report.json`. Server downloads record these timings in each job's log.
+Durations cover Soulseek process startup/login, search and peer selection,
+transfer attempts, missing-file checks, both YouTube searches, candidate
+metadata and ranking, each yt-dlp retry, audio transfer, MP3 encoding,
+metadata/thumbnail processing, and final probing/copying/transcoding.
+Parent totals include their child stages; do not add both together.
+Soulseek and yt-dlp subprocess stages use observed output boundaries, so a
+transfer interval can include connection or queue time. First-progress time
+is recorded when progress can be attributed to a track.
+
+For repeated, isolated measurements of several tracks, save a JSON array
+containing `id`, `artist`, `title`, and `duration` (seconds), then run:
+
+```bash
+go run ./cmd/download-bench --tracks tracks.json --out /tmp/spotseek-bench-new --repeat 3
+```
+
+The output directory must be new. Each trial gets its own work and audio
+folders, a timestamped `timeline.log`, and a `result.json`. `results.json`
+collects completed trials even if a later trial is interrupted. Downloads
+run sequentially using the configured bitrate, executables, credentials,
+matching threshold, and Soulseek deadline. Supplied metadata models server
+downloads; use `--fetch-metadata` to include public Spotify page extraction.
+`--mode direct-youtube` skips Soulseek as an explicitly forced control;
+`--mode both` runs both routes. Automatic runs retain the real fallback rules.
+
+Fallback search reads structured results and discards channel/album browse
+entries. YouTube Music and YouTube searches run together. Full metadata is
+checked in groups of three, with at most four search processes across jobs.
+Flat metadata chooses the initial shortlist; final scoring still uses full
+metadata. More candidates are checked unless the best score reaches the
+matcher's maximum (12); earlier entries are still checked to preserve ties.
+Metadata checks retain a shared 180-second deadline.
+
+For server jobs and single-track CLI runs, fallback search starts alongside
+Soulseek. YouTube audio is downloaded only after Soulseek misses the track.
+Pending speculative search is canceled when Soulseek succeeds or the job is
+canceled. Multi-track CLI and album runs search YouTube only for missing tracks.
+Timing spans can overlap; pipeline elapsed time measures the real wall time.
+
 <!-- AI-assisted documentation begins. -->
 ## Mixxx server and catalogue search
 

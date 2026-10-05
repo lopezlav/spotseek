@@ -12,10 +12,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
 	"spotseek-app/internal/spotify"
+	"spotseek-app/internal/timing"
 	"spotseek-app/internal/ytdlp"
 )
 
@@ -57,6 +59,9 @@ type Options struct {
 	SoulseekUser    string
 	SoulseekPass    string
 	Log             func(string)
+	MeasureTimings  bool
+	OnTiming        func(timing.Event)
+	logMu           sync.Mutex
 }
 
 // Result summarizes a finished run.
@@ -66,6 +71,7 @@ type Result struct {
 	Missing    int
 	Files      int
 	OutputDir  string
+	Timings    []timing.Event `json:",omitempty"`
 }
 
 type missingTrack struct {
@@ -84,12 +90,33 @@ func allMissing(tracks []spotify.Track) []missingTrack {
 
 func (o *Options) log(format string, a ...any) {
 	if o.Log != nil {
+		o.logMu.Lock()
+		defer o.logMu.Unlock()
 		o.Log(fmt.Sprintf(format, a...))
 	}
 }
 
 // Run executes the full pipeline.
-func Run(ctx context.Context, o *Options) (*Result, error) {
+func Run(ctx context.Context, o *Options) (result *Result, runErr error) {
+	var events []timing.Event
+	if o.MeasureTimings || o.OnTiming != nil {
+		ctx = timing.WithObserver(ctx, func(e timing.Event) {
+			events = append(events, e)
+			if o.OnTiming != nil {
+				o.OnTiming(e)
+			}
+			data, _ := json.Marshal(e)
+			o.log("TIMING %s", data)
+		})
+	}
+	finish := timing.Begin(ctx, "pipeline.total", o.ScopeName)
+	defer func() {
+		finish(runErr)
+		if result != nil {
+			result.Timings = events
+		}
+	}()
+	setup := timing.Begin(ctx, "pipeline.setup", "")
 	if o.WorkDir == "" {
 		o.WorkDir = filepath.Join(o.OutputDir, ".work")
 	}
@@ -109,24 +136,30 @@ func Run(ctx context.Context, o *Options) (*Result, error) {
 		o.MinScore = 6
 	}
 	if err := os.MkdirAll(o.OutputDir, 0o755); err != nil {
+		setup(err)
 		return nil, err
 	}
 	if err := os.MkdirAll(o.WorkDir, 0o755); err != nil {
+		setup(err)
 		return nil, err
 	}
+	setup(nil)
 
 	// 1. Spotify metadata
 	var coll *spotify.Collection
+	metadata := timing.Begin(ctx, "spotify.metadata", "")
 	if o.Collection != nil {
 		coll = o.Collection
 	} else {
 		o.log("Reading Spotify metadata...")
 		c, err := spotify.Extract(o.Input)
 		if err != nil {
+			metadata(err)
 			return nil, fmt.Errorf("spotify: %w", err)
 		}
 		coll = c
 	}
+	metadata(nil)
 	tracks := coll.Tracks
 	if o.Limit > 0 && len(tracks) > o.Limit {
 		tracks = tracks[:o.Limit]
@@ -151,6 +184,14 @@ func Run(ctx context.Context, o *Options) (*Result, error) {
 	ytOut := filepath.Join(o.WorkDir, "youtube")
 	var missing []missingTrack
 	useAlbumMode := coll.Kind == "album" && coll.Artist != ""
+	// Server jobs contain one track. Prepare a fallback candidate while the
+	// Soulseek process searches/transfers, but never download speculative audio.
+	// Multi-track CLI/album runs stay lazy to avoid searching every song twice.
+	var prepared *fallbackSearch
+	if o.UseFallback && !o.SkipSoulseek && !useAlbumMode && len(tracks) == 1 {
+		prepared = startFallbackSearch(ctx, allMissing(tracks)[0])
+		defer prepared.stop()
+	}
 
 	// The Soulseek phase gets its own time limit. A login problem or a dead
 	// network must not block the YouTube fallback forever.
@@ -176,7 +217,7 @@ func Run(ctx context.Context, o *Options) (*Result, error) {
 		missing = allMissing(tracks)
 		if o.UseFallback {
 			o.log("Trying YouTube Music for all tracks...")
-			fallback(ctx, o, missing, ytOut)
+			fallback(ctx, o, missing, ytOut, prepared)
 		}
 	} else if useAlbumMode {
 		// An album is usually shared as one folder. One search finds every track.
@@ -187,7 +228,7 @@ func Run(ctx context.Context, o *Options) (*Result, error) {
 			missing = allMissing(tracks)
 			if o.UseFallback {
 				o.log("Trying YouTube Music for all tracks...")
-				fallback(ctx, o, missing, ytOut)
+				fallback(ctx, o, missing, ytOut, prepared)
 			}
 		} else if err != nil {
 			return nil, err
@@ -206,7 +247,7 @@ func Run(ctx context.Context, o *Options) (*Result, error) {
 				o.log("%d tracks are not in the album folder", len(missing))
 				if o.UseFallback {
 					o.log("Trying YouTube Music for the missing tracks...")
-					fallback(ctx, o, missing, ytOut)
+					fallback(ctx, o, missing, ytOut, prepared)
 				}
 			}
 		} else {
@@ -217,11 +258,14 @@ func Run(ctx context.Context, o *Options) (*Result, error) {
 
 	if !useAlbumMode && len(missing) == 0 {
 		csvPath := filepath.Join(o.WorkDir, safe+".csv")
-		if err := writeTracksCSV(csvPath, tracks); err != nil {
+		end := timing.Begin(ctx, "soulseek.csv_write", "")
+		err := writeTracksCSV(csvPath, tracks)
+		end(err)
+		if err != nil {
 			return nil, err
 		}
 		o.log("Downloading from Soulseek (mp3, prefer %skbps)...", o.Bitrate)
-		err := runSockseek(ssCtx, o, csvPath, ssOut)
+		err = runSockseek(ssCtx, o, csvPath, ssOut)
 		if sockseekGaveUp(err) {
 			o.log("Soulseek did not answer in %s", o.SockseekWait)
 			missing = allMissing(tracks)
@@ -230,20 +274,27 @@ func Run(ctx context.Context, o *Options) (*Result, error) {
 		} else {
 			ssFolder := filepath.Join(ssOut, safe)
 			indexPath := filepath.Join(ssFolder, "_index.csv")
+			end = timing.Begin(ctx, "soulseek.missing_check", "")
 			missing = readMissing(indexPath, tracks)
+			end(nil)
 		}
 		if len(missing) > 0 {
 			o.log("%d tracks missing from Soulseek", len(missing))
 		}
 		if len(missing) > 0 && o.UseFallback {
 			o.log("Trying YouTube Music for the missing tracks...")
-			fallback(ctx, o, missing, ytOut)
+			fallback(ctx, o, missing, ytOut, prepared)
 		}
+	}
+	if prepared != nil {
+		prepared.stop()
 	}
 
 	// 4. Normalize and merge
 	o.log("Normalizing to mp3 %skbps...", o.Bitrate)
+	end := timing.Begin(ctx, "normalize.total", "")
 	files, err := normalizeAll(ctx, o, []string{ssOut, ytOut}, o.OutputDir)
+	end(err)
 	if err != nil {
 		return nil, err
 	}
@@ -278,7 +329,11 @@ func writeTracksCSV(path string, tracks []spotify.Track) error {
 	return w.Error()
 }
 
-func runStream(ctx context.Context, o *Options, args ...string) error {
+func runStream(ctx context.Context, o *Options, args ...string) (retErr error) {
+	finish := timing.Begin(ctx, "soulseek.process_total", "")
+	defer func() { finish(retErr) }()
+	progress := newSoulseekTiming(ctx)
+	defer func() { progress.finish(retErr) }()
 	cmd := exec.CommandContext(ctx, o.SockseekPath, args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -292,6 +347,7 @@ func runStream(ctx context.Context, o *Options, args ...string) error {
 	scan.Buffer(make([]byte, 1024*1024), 1024*1024)
 	for scan.Scan() {
 		line := scan.Text()
+		progress.line(line)
 		o.log("%s", line)
 		if o.AbortSockseekOn != nil && o.AbortSockseekOn(line) {
 			_ = cmd.Process.Kill()
@@ -322,7 +378,7 @@ func sockseekBaseArgs(o *Options) []string {
 }
 
 func sockseekProgressArgs(o *Options) []string {
-	if o.ProgressJSON {
+	if o.ProgressJSON || o.MeasureTimings || o.OnTiming != nil {
 		return []string{"--progress-json"}
 	}
 	return nil
@@ -402,14 +458,27 @@ func readMissing(indexPath string, tracks []spotify.Track) []missingTrack {
 	return out
 }
 
-func fallback(ctx context.Context, o *Options, missing []missingTrack, ytOut string) {
+func fallback(ctx context.Context, o *Options, missing []missingTrack, ytOut string, prepared *fallbackSearch) {
+	finish := timing.Begin(ctx, "youtube.fallback_total", "")
+	defer func() { finish(ctx.Err()) }()
 	for i, m := range missing {
 		if ctx.Err() != nil {
 			return
 		}
 		o.log("[%d/%d] %s - %s", i+1, len(missing), m.Artist, m.Title)
-		cands, err := ytdlp.SearchCandidates(ctx, m.Artist, m.Title, m.Duration, 5)
+		var cands []ytdlp.Candidate
+		var err error
+		if prepared != nil && prepared.track == m {
+			end := timing.Begin(ctx, "youtube.wait_for_prepared_search", m.Artist+" - "+m.Title)
+			cands, err = prepared.get(ctx)
+			end(err)
+		} else {
+			cands, err = ytdlp.SearchCandidates(ctx, m.Artist, m.Title, m.Duration, 5)
+		}
 		if err != nil || len(cands) == 0 {
+			if err != nil {
+				o.log("    search failed: %v", err)
+			}
 			o.log("    no candidates")
 			continue
 		}
@@ -455,11 +524,13 @@ func walkAudio(dir string) []string {
 }
 
 func ffprobeBitrate(ctx context.Context, o *Options, path string) int {
+	end := timing.Begin(ctx, "normalize.ffprobe", filepath.Base(path))
 	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, o.FfprobePath, "-v", "error", "-select_streams", "a:0",
 		"-show_entries", "stream=bit_rate", "-of", "default=nw=1:nk=1", path)
 	out, err := cmd.Output()
+	end(err)
 	if err != nil {
 		return 0
 	}
@@ -490,7 +561,10 @@ func normalizeAll(ctx context.Context, o *Options, sources []string, destDir str
 	target, _ := strconv.Atoi(o.Bitrate)
 	count := 0
 	for _, srcDir := range sources {
-		for _, src := range walkAudio(srcDir) {
+		end := timing.Begin(ctx, "normalize.scan", filepath.Base(srcDir))
+		audio := walkAudio(srcDir)
+		end(nil)
+		for _, src := range audio {
 			if ctx.Err() != nil {
 				return count, ctx.Err()
 			}
@@ -499,8 +573,15 @@ func normalizeAll(ctx context.Context, o *Options, sources []string, destDir str
 				base = "track"
 			}
 			dest := uniqueDest(destDir, base)
-			if strings.EqualFold(filepath.Ext(src), ".mp3") && ffprobeBitrate(ctx, o, src) == target {
-				if err := copyFile(src, dest); err != nil {
+			bitrate := 0
+			if strings.EqualFold(filepath.Ext(src), ".mp3") {
+				bitrate = ffprobeBitrate(ctx, o, src)
+			}
+			if strings.EqualFold(filepath.Ext(src), ".mp3") && bitrate == target {
+				end = timing.Begin(ctx, "normalize.copy", filepath.Base(src))
+				err := copyFile(src, dest)
+				end(err)
+				if err != nil {
 					o.log("copy failed: %v", err)
 					continue
 				}
@@ -508,9 +589,11 @@ func normalizeAll(ctx context.Context, o *Options, sources []string, destDir str
 				continue
 			}
 			cctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+			end = timing.Begin(ctx, "normalize.ffmpeg", filepath.Base(src))
 			cmd := exec.CommandContext(cctx, o.FfmpegPath, "-y", "-loglevel", "error", "-i", src,
 				"-vn", "-map_metadata", "0", "-c:a", "libmp3lame", "-b:a", o.Bitrate+"k", dest)
 			err := cmd.Run()
+			end(err)
 			cancel()
 			if err != nil {
 				o.log("transcode failed for %s: %v", filepath.Base(src), err)

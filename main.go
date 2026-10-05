@@ -530,6 +530,7 @@ func runCLI(args []string) {
 	out := fs.String("o", "", "output folder")
 	bitrate := fs.String("bitrate", "320", "mp3 bitrate")
 	noFallback := fs.Bool("no-fallback", false, "skip the YouTube fallback")
+	measureTimings := fs.Bool("timings", false, "log elapsed time for each download stage")
 	limit := fs.Int("limit", 0, "only the first N tracks")
 	extractOnly := fs.Bool("extract-only", false, "only print the Spotify track list")
 	_ = fs.Parse(reorderFlags(args))
@@ -557,12 +558,13 @@ func runCLI(args []string) {
 		os.Exit(2)
 	}
 	res, err := pipeline.Run(context.Background(), &pipeline.Options{
-		Input:       input,
-		OutputDir:   *out,
-		Bitrate:     *bitrate,
-		UseFallback: !*noFallback,
-		Limit:       *limit,
-		Log:         func(s string) { fmt.Println(s) },
+		Input:          input,
+		OutputDir:      *out,
+		Bitrate:        *bitrate,
+		UseFallback:    !*noFallback,
+		MeasureTimings: *measureTimings,
+		Limit:          *limit,
+		Log:            func(s string) { fmt.Println(s) },
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)

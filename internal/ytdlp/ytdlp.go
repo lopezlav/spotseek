@@ -1,18 +1,19 @@
 package ytdlp
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"sort"
-	"strconv"
 	"strings"
 	"time"
 	"unicode"
+
+	"spotseek-app/internal/timing"
 )
 
 // Candidate is one YouTube search result with a relevance score.
@@ -114,99 +115,25 @@ func score(c Candidate, title, artist string, length int) float64 {
 var Binary = "yt-dlp"
 
 func runYtDlp(ctx context.Context, timeout time.Duration, args ...string) (string, error) {
+	select {
+	case searchProcessSlots <- struct{}{}:
+		defer func() { <-searchProcessSlots }()
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	full := append([]string{"--no-warnings", "--ignore-config"}, args...)
 	cmd := exec.CommandContext(ctx, Binary, full...)
 	out, err := cmd.Output()
-	if ctx.Err() == context.DeadlineExceeded {
+	if ctx.Err() != nil {
 		return "", ctx.Err()
 	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+		err = fmt.Errorf("yt-dlp: %w: %s", err, strings.TrimSpace(string(exitErr.Stderr)))
+	}
 	return string(out), err
-}
-
-func parseRows(out string) [][]string {
-	var rows [][]string
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimRight(line, "\r")
-		if line != "" {
-			rows = append(rows, strings.Split(line, "\t"))
-		}
-	}
-	return rows
-}
-
-// SearchCandidates searches YouTube Music and YouTube, then scores the results.
-func SearchCandidates(ctx context.Context, artist, title string, length, limit int) ([]Candidate, error) {
-	q := strings.TrimSpace(artist + " " + title)
-	seen := map[string]bool{}
-	var ids []string
-
-	add := func(out string) {
-		for _, row := range parseRows(out) {
-			id := strings.TrimSpace(row[0])
-			if id != "" && !seen[id] {
-				seen[id] = true
-				ids = append(ids, id)
-			}
-		}
-	}
-
-	musicURL := "https://music.youtube.com/search?q=" + url.QueryEscape(q)
-	out, _ := runYtDlp(ctx, 90*time.Second,
-		"--skip-download", "--flat-playlist", "--print", "%(id)s",
-		"--playlist-end", strconv.Itoa(limit), musicURL)
-	add(out)
-
-	out, _ = runYtDlp(ctx, 90*time.Second,
-		"--skip-download", "--flat-playlist", "--print", "%(id)s",
-		fmt.Sprintf("ytsearch%d:%s", limit, q))
-	add(out)
-
-	if len(ids) == 0 {
-		return nil, nil
-	}
-	shortlist := ids
-	if len(shortlist) > limit*2 {
-		shortlist = shortlist[:limit*2]
-	}
-	var urls []string
-	for _, id := range shortlist {
-		urls = append(urls, "https://www.youtube.com/watch?v="+id)
-	}
-	args := []string{"--skip-download", "--print",
-		"%(title)s\t%(artist)s\t%(album)s\t%(duration)s\t%(id)s\t%(channel)s"}
-	args = append(args, urls...)
-	out, _ = runYtDlp(ctx, 180*time.Second, args...)
-
-	var cands []Candidate
-	for _, row := range parseRows(out) {
-		if len(row) < 6 {
-			continue
-		}
-		dur, _ := strconv.Atoi(row[3])
-		artist := row[1]
-		if artist == "NA" {
-			artist = row[5]
-		}
-		album := row[2]
-		if album == "NA" {
-			album = ""
-		}
-		cands = append(cands, Candidate{
-			Title:    row[0],
-			Artist:   artist,
-			Album:    album,
-			Duration: dur,
-			ID:       row[4],
-			URL:      "https://www.youtube.com/watch?v=" + row[4],
-		})
-	}
-	for i := range cands {
-		cands[i].Score = score(cands[i], title, artist, length)
-	}
-	sort.SliceStable(cands, func(i, j int) bool { return cands[i].Score > cands[j].Score })
-	return cands, nil
 }
 
 // SafeName turns a string into a safe file name.
@@ -217,7 +144,9 @@ func SafeName(s string) string {
 }
 
 // Download fetches one candidate as an mp3 file.
-func Download(ctx context.Context, c Candidate, outdir, filename, quality string) error {
+func Download(ctx context.Context, c Candidate, outdir, filename, quality string) (retErr error) {
+	finish := timing.Begin(ctx, "youtube.download_total", filename)
+	defer func() { finish(retErr) }()
 	if err := os.MkdirAll(outdir, 0o755); err != nil {
 		return err
 	}
@@ -228,7 +157,7 @@ func Download(ctx context.Context, c Candidate, outdir, filename, quality string
 		{"--extractor-args", "youtube:player_client=web_safari,tv"},
 	}
 	var lastErr error
-	for _, extra := range attempts {
+	for i, extra := range attempts {
 		args := []string{"--no-warnings", "--ignore-config",
 			"-f", "bestaudio/best",
 			"-x", "--audio-format", "mp3", "--audio-quality", quality,
@@ -236,8 +165,9 @@ func Download(ctx context.Context, c Candidate, outdir, filename, quality string
 			"-o", template}
 		args = append(args, extra...)
 		args = append(args, c.URL)
-		cmd := exec.CommandContext(ctx, Binary, args...)
-		out, err := cmd.CombinedOutput()
+		end := timing.Begin(ctx, "youtube.download_attempt", fmt.Sprintf("%s; attempt %d", filename, i+1))
+		out, err := downloadOutput(ctx, args, filename, i+1)
+		end(err)
 		if err == nil {
 			return nil
 		}
@@ -247,4 +177,61 @@ func Download(ctx context.Context, c Candidate, outdir, filename, quality string
 		}
 	}
 	return lastErr
+}
+
+// yt-dlp's emitted markers separate extraction, audio transfer, encoding, and
+// tagging. These are observed process-output boundaries, not network traces.
+func downloadOutput(ctx context.Context, args []string, filename string, attempt int) ([]byte, error) {
+	if !timing.Enabled(ctx) {
+		return exec.CommandContext(ctx, Binary, args...).CombinedOutput()
+	}
+	args = append([]string{"--newline"}, args...)
+	cmd := exec.CommandContext(ctx, Binary, args...)
+	pipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	cmd.Stderr = cmd.Stdout
+	start := time.Now()
+	stage := "youtube.extract_before_transfer"
+	detail := fmt.Sprintf("%s; attempt %d", filename, attempt)
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	var output strings.Builder
+	scan := bufio.NewScanner(pipe)
+	scan.Buffer(make([]byte, 65536), 1024*1024)
+	transition := func(next string) {
+		if stage == next {
+			return
+		}
+		timing.Interval(ctx, stage, detail, start, nil)
+		stage, start = next, time.Now()
+	}
+	for scan.Scan() {
+		line := scan.Text()
+		output.WriteString(line + "\n")
+		switch {
+		case strings.HasPrefix(line, "[download] Destination:"):
+			transition("youtube.audio_transfer")
+		case strings.HasPrefix(line, "[ExtractAudio]"):
+			transition("youtube.mp3_encode")
+		case strings.HasPrefix(line, "[Metadata]"):
+			transition("youtube.metadata_embed")
+		case strings.HasPrefix(line, "[ThumbnailsConvertor]"):
+			transition("youtube.thumbnail_convert")
+		case strings.HasPrefix(line, "[EmbedThumbnail]"):
+			transition("youtube.thumbnail_embed")
+		}
+	}
+	scanErr := scan.Err()
+	if scanErr != nil {
+		_ = cmd.Process.Kill()
+	}
+	err = cmd.Wait()
+	if scanErr != nil {
+		err = scanErr
+	}
+	timing.Interval(ctx, stage, detail, start, err)
+	return []byte(output.String()), err
 }
