@@ -16,7 +16,7 @@ import (
 )
 
 // Version is the server version, reported by /health.
-const Version = "1.6.0"
+const Version = "1.6.1"
 
 // logf adapts log.Print to the func(string) logger used by the index.
 func logf(msg string) { log.Print(msg) }

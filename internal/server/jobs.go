@@ -329,7 +329,9 @@ func (m *Manager) finish(id string, state JobState, path, source, errMsg string)
 		j.Percent = 100
 	}
 	j.Path = path
-	j.Source = source
+	if source != "" {
+		j.Source = source
+	}
 	j.Error = errMsg
 	j.cancel = nil
 	delete(m.active, accountTrackKey(j.AccountID, j.Track))
@@ -357,6 +359,10 @@ func (m *Manager) runJob(id string) {
 	batchName := j.BatchName
 	batchKind := j.Kind
 	skipSoulseek := time.Now().Before(m.soulseekDownUntil)
+	j.Source = "soulseek"
+	if skipSoulseek {
+		j.Source = "youtube"
+	}
 	progressive := j.Progressive
 	var preparation *pipeline.PreparedTrack
 	var unusedPreparation *pipeline.PreparedTrack
@@ -540,6 +546,22 @@ func (m *Manager) handleLog(id, line string) {
 		return
 	}
 	switch ev.Type {
+	case "source":
+		var d struct {
+			Source string `json:"source"`
+		}
+		if json.Unmarshal(ev.Data, &d) == nil && (d.Source == "soulseek" || d.Source == "youtube") {
+			m.mu.Lock()
+			if j := m.jobs[id]; j != nil {
+				if j.Source != d.Source && activeState(j.State) {
+					j.State = JobRunning
+					j.Percent = 5
+				}
+				j.Source = d.Source
+				m.touchLocked(j)
+			}
+			m.mu.Unlock()
+		}
 	case "search_start":
 		m.setState(id, JobRunning, 5)
 	case "download_start":

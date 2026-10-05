@@ -363,6 +363,7 @@ func writeTracksCSV(path string, tracks []spotify.Track) error {
 }
 
 func runStream(ctx context.Context, o *Options, args ...string) (retErr error) {
+	o.log(`{"type":"source","data":{"source":"soulseek"}}`)
 	finish := timing.Begin(ctx, "soulseek.process_total", "")
 	defer func() { finish(retErr) }()
 	progress := newSoulseekTiming(ctx)
@@ -492,6 +493,9 @@ func readMissing(indexPath string, tracks []spotify.Track) []missingTrack {
 }
 
 func fallback(ctx context.Context, o *Options, missing []missingTrack, ytOut string, prepared *fallbackSearch) {
+	if len(missing) > 0 {
+		o.log(`{"type":"source","data":{"source":"youtube"}}`)
+	}
 	finish := timing.Begin(ctx, "youtube.fallback_total", "")
 	defer func() { finish(ctx.Err()) }()
 	for i, m := range missing {
@@ -528,6 +532,7 @@ func fallback(ctx context.Context, o *Options, missing []missingTrack, ytOut str
 			name = ytdlp.SafeName(m.Title)
 		}
 		o.log("    downloading: %s (score %.0f)", best.Title, best.Score)
+		o.log(`{"type":"download_start","data":{}}`)
 		if err := ytdlp.Download(ctx, best, ytOut, name, o.Bitrate+"K"); err != nil {
 			o.log("    download failed: %v", err)
 		}

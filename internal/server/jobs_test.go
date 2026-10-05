@@ -211,3 +211,30 @@ func TestJobHistoryTrimKeepsActiveJobsVisible(t *testing.T) {
 }
 
 // AI-generated code ends.
+
+func TestDownloadSourceChangesBeforeCompletion(t *testing.T) {
+	m, _ := testJobManager(t, t.TempDir())
+	m.mu.Lock()
+	job := &Job{ID: "source-test", AccountID: "account-a", State: JobRunning, Track: spotify.Track{ID: "source-track", Title: "Title"}}
+	m.putLocked(job)
+	m.mu.Unlock()
+	for _, source := range []string{"soulseek", "youtube"} {
+		m.handleLog(job.ID, fmt.Sprintf(`{"type":"source","data":{"source":"%s"}}`, source))
+		_, jobs := m.SnapshotForAccount(0, "", "account-a")
+		if len(jobs) != 1 || jobs[0].Source != source || jobs[0].State != JobRunning {
+			t.Fatalf("live source not reported: %+v", jobs)
+		}
+	}
+}
+
+func TestFailedDownloadKeepsItsLastSource(t *testing.T) {
+	m, _ := testJobManager(t, t.TempDir())
+	m.mu.Lock()
+	m.putLocked(&Job{ID: "source-failed", AccountID: "account-a", Source: "youtube", State: JobDownloading, Track: spotify.Track{ID: "source-track", Title: "Title"}})
+	m.mu.Unlock()
+	m.finish("source-failed", JobFailed, "", "", "peer failed")
+	_, jobs := m.SnapshotForAccount(0, "", "account-a")
+	if len(jobs) != 1 || jobs[0].Source != "youtube" {
+		t.Fatalf("source lost: %+v", jobs)
+	}
+}
