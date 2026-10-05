@@ -34,21 +34,26 @@ const (
 
 // Job is one track download. It is safe to copy for JSON.
 type Job struct {
-	ID        string        `json:"id"`
-	AccountID string        `json:"account_id,omitempty"`
-	BatchID   string        `json:"batch_id"`
-	BatchName string        `json:"batch_name"`
-	Kind      string        `json:"kind"`
-	Track     spotify.Track `json:"track"`
-	State     JobState      `json:"state"`
-	Percent   float64       `json:"percent"`
-	Path      string        `json:"path,omitempty"`
-	Source    string        `json:"source,omitempty"`
-	Error     string        `json:"error,omitempty"`
-	LastLog   string        `json:"last_log,omitempty"`
-	LogLines  []string      `json:"log,omitempty"`
-	CreatedAt time.Time     `json:"created_at"`
-	UpdatedAt time.Time     `json:"updated_at"`
+	ID              string        `json:"id"`
+	AccountID       string        `json:"account_id,omitempty"`
+	BatchID         string        `json:"batch_id"`
+	BatchName       string        `json:"batch_name"`
+	Kind            string        `json:"kind"`
+	Track           spotify.Track `json:"track"`
+	State           JobState      `json:"state"`
+	Percent         float64       `json:"percent"`
+	Path            string        `json:"path,omitempty"`
+	Source          string        `json:"source,omitempty"`
+	Error           string        `json:"error,omitempty"`
+	LastLog         string        `json:"last_log,omitempty"`
+	LogLines        []string      `json:"log,omitempty"`
+	CreatedAt       time.Time     `json:"created_at"`
+	UpdatedAt       time.Time     `json:"updated_at"`
+	Progressive     bool          `json:"progressive,omitempty"`
+	StreamPath      string        `json:"stream_path,omitempty"`
+	BufferedSeconds float64       `json:"buffered_seconds,omitempty"`
+	StreamComplete  bool          `json:"stream_complete,omitempty"`
+	StreamError     string        `json:"stream_error,omitempty"`
 
 	cancel    context.CancelFunc
 	changeSeq uint64
@@ -57,6 +62,7 @@ type Job struct {
 // Manager owns the download queue and the worker pool.
 type Manager struct {
 	mu            sync.Mutex
+	prepareMu     sync.Mutex
 	ctx           context.Context
 	jobs          map[string]*Job
 	downloads     map[string]DownloadedTrack
@@ -75,6 +81,7 @@ type Manager struct {
 	savedPath     string
 	epoch         string
 	accountID     string
+	warm          *warmTrack
 
 	// Soulseek is marked as unavailable after a login failure. New jobs
 	// then use the YouTube fallback directly for a while.
@@ -111,6 +118,13 @@ func NewManager(ctx context.Context, settings *Settings, index *libraryindex.Ind
 // Wait blocks until all workers stop.
 func (m *Manager) Wait() {
 	m.wg.Wait()
+	m.mu.Lock()
+	warm := m.warm
+	m.warm = nil
+	m.mu.Unlock()
+	if warm != nil {
+		warm.preparation.Stop()
+	}
 	if err := m.Flush(); err != nil {
 		log.Printf("jobs: cannot save downloads: %v", err)
 	}
@@ -120,9 +134,14 @@ func (m *Manager) Wait() {
 // SetSettings swaps the settings used by new jobs.
 func (m *Manager) SetSettings(s *Settings) {
 	m.mu.Lock()
+	warm := m.warm
+	m.warm = nil
 	m.settings = s
 	m.markDirtyLocked()
 	m.mu.Unlock()
+	if warm != nil {
+		warm.preparation.Stop()
+	}
 }
 
 func randomID(n int) string {
@@ -209,6 +228,10 @@ func (m *Manager) Enqueue(kind, name string, tracks []spotify.Track) []*Job {
 
 // AI-generated code begins.
 func (m *Manager) EnqueueForAccount(kind, name string, tracks []spotify.Track, accountID string) []*Job {
+	return m.EnqueuePlaybackForAccount(kind, name, tracks, accountID, false)
+}
+
+func (m *Manager) EnqueuePlaybackForAccount(kind, name string, tracks []spotify.Track, accountID string, progressive bool) []*Job {
 	batchID := randomID(8)
 	var toQueue []string
 	var out []*Job
@@ -245,6 +268,7 @@ func (m *Manager) EnqueueForAccount(kind, name string, tracks []spotify.Track, a
 		}
 		j := m.newJobLocked(batchID, kind, name, t)
 		j.AccountID = accountID
+		j.Progressive = progressive
 		m.putLocked(j)
 		m.active[key] = j.ID
 		out = append(out, copyJob(j))
@@ -333,10 +357,41 @@ func (m *Manager) runJob(id string) {
 	batchName := j.BatchName
 	batchKind := j.Kind
 	skipSoulseek := time.Now().Before(m.soulseekDownUntil)
+	progressive := j.Progressive
+	var preparation *pipeline.PreparedTrack
+	var unusedPreparation *pipeline.PreparedTrack
+	if m.warm != nil && m.warm.key == accountTrackKey(j.AccountID, track) && time.Now().Before(m.warm.expires) {
+		preparation = m.warm.preparation
+		m.warm = nil
+	} else if m.warm != nil {
+		unusedPreparation = m.warm.preparation
+		m.warm = nil
+	}
 	m.mu.Unlock()
+	if unusedPreparation != nil {
+		unusedPreparation.Stop()
+	}
 
 	outputDir := filepath.Join(settings.OutputDir, scopeFolder(batchName, batchKind))
 	workDir := filepath.Join(settings.OutputDir, ".spotseek", "work", id)
+	var playback *pipeline.ProgressivePlayback
+	if progressive && track.DurationSec > 0 {
+		var err error
+		playback, err = pipeline.StartProgressivePlayback(ctx, workDir, track, settings.FfmpegPath, func(path string, status pipeline.PlaybackStatus) {
+			m.mu.Lock()
+			if job := m.jobs[id]; job != nil {
+				job.StreamPath = path
+				job.BufferedSeconds = float64(status.BufferedFrames) / float64(status.SampleRate)
+				job.StreamComplete = status.Complete
+				job.StreamError = status.Error
+				m.touchLocked(job)
+			}
+			m.mu.Unlock()
+		})
+		if err != nil {
+			m.handleLog(id, "Progressive playback unavailable: "+err.Error())
+		}
+	}
 	opts := &pipeline.Options{
 		Collection: &spotify.Collection{
 			ID:     track.ID,
@@ -345,6 +400,7 @@ func (m *Manager) runJob(id string) {
 			Artist: track.Artist,
 			Tracks: []spotify.Track{track},
 		},
+		Preparation:    preparation,
 		OutputDir:      outputDir,
 		WorkDir:        workDir,
 		ScopeName:      "job-" + id,
@@ -373,6 +429,13 @@ func (m *Manager) runJob(id string) {
 	}
 
 	res, err := pipeline.Run(ctx, opts)
+	if playback != nil {
+		if err == nil && res != nil && res.Missing == 0 && res.Files > 0 {
+			playback.Finish()
+		} else {
+			playback.Cancel()
+		}
+	}
 	if err != nil {
 		if ctx.Err() != nil {
 			m.finish(id, JobCanceled, "", "", "canceled")

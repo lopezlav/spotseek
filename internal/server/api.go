@@ -346,10 +346,11 @@ func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleStartDownloads(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Kind   string     `json:"kind"`
-		ID     string     `json:"id"`
-		Name   string     `json:"name"`
-		Tracks []trackDTO `json:"tracks"`
+		Kind        string     `json:"kind"`
+		ID          string     `json:"id"`
+		Name        string     `json:"name"`
+		Tracks      []trackDTO `json:"tracks"`
+		Progressive bool       `json:"progressive"`
 	}
 	if err := readJSON(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "bad JSON: "+err.Error())
@@ -377,7 +378,7 @@ func (s *Server) handleStartDownloads(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	jobs := s.manager.EnqueueForAccount(body.Kind, body.Name, tracks, identity.ID)
+	jobs := s.manager.EnqueuePlaybackForAccount(body.Kind, body.Name, tracks, identity.ID, body.Progressive)
 	batchID := ""
 	if len(jobs) > 0 {
 		batchID = jobs[0].BatchID

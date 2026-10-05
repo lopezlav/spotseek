@@ -16,7 +16,7 @@ import (
 )
 
 // Version is the server version, reported by /health.
-const Version = "1.5.0"
+const Version = "1.6.0"
 
 // logf adapts log.Print to the func(string) logger used by the index.
 func logf(msg string) { log.Print(msg) }
@@ -99,6 +99,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/index/lookup", s.handleLookup)
 	mux.HandleFunc("POST /api/v1/index/rescan", s.handleRescan)
 	mux.HandleFunc("POST /api/v1/downloads", s.handleStartDownloads)
+	mux.HandleFunc("POST /api/v1/downloads/prepare", s.handlePrepareDownload)
 	mux.HandleFunc("GET /api/v1/downloads", s.handleGetDownloads)
 	mux.HandleFunc("POST /api/v1/downloads/cancel", s.handleCancelDownloads)
 	return s.withLogging(mux)

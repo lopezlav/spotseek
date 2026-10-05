@@ -143,6 +143,14 @@ Timing spans can overlap; pipeline elapsed time measures the real wall time.
 <!-- AI-assisted documentation begins. -->
 ## Mixxx server and catalogue search
 
+The Mixxx progressive-download prototype uses `POST /api/v1/downloads/prepare`
+with one track's metadata to prepare a drag without downloading audio.
+`POST /api/v1/downloads` accepts `progressive: true` to expose a stable playback
+descriptor, buffered duration, completion, and decoder errors in job snapshots.
+Soulseek transfers decode to append-only PCM while the final MP3 is processed
+separately. YouTube fallback loads after completion. See the Mixxx fork's
+`docs/progressive-downloads.md` for behavior and prototype limitations.
+
 Run `spotseek-app serve` to start the local service on `127.0.0.1:8765`.
 The Mixxx Spotify feature uses the service for login, metadata, file lookup,
 and downloads. The service does not open the Mixxx database.

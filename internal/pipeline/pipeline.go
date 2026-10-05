@@ -61,6 +61,7 @@ type Options struct {
 	Log             func(string)
 	MeasureTimings  bool
 	OnTiming        func(timing.Event)
+	Preparation     *PreparedTrack
 	logMu           sync.Mutex
 }
 
@@ -188,10 +189,19 @@ func Run(ctx context.Context, o *Options) (result *Result, runErr error) {
 	// Soulseek process searches/transfers, but never download speculative audio.
 	// Multi-track CLI/album runs stay lazy to avoid searching every song twice.
 	var prepared *fallbackSearch
-	if o.UseFallback && !o.SkipSoulseek && !useAlbumMode && len(tracks) == 1 {
+	preparation := o.Preparation
+	if preparation != nil && (len(tracks) != 1 || preparation.Track != tracks[0]) {
+		preparation.Stop()
+		preparation = nil
+	}
+	if preparation != nil {
+		prepared = preparation.youtube
+		defer preparation.Stop()
+	} else if o.UseFallback && !o.SkipSoulseek && !useAlbumMode && len(tracks) == 1 {
 		prepared = startFallbackSearch(ctx, allMissing(tracks)[0])
 		defer prepared.stop()
 	}
+	soulseekHandled := false
 
 	// The Soulseek phase gets its own time limit. A login problem or a dead
 	// network must not block the YouTube fallback forever.
@@ -212,7 +222,30 @@ func Run(ctx context.Context, o *Options) (result *Result, runErr error) {
 	}
 
 	// 2. Soulseek
-	if o.SkipSoulseek {
+	if preparation != nil && preparation.HasSoulseek && !o.SkipSoulseek {
+		end := timing.Begin(ctx, "soulseek.wait_for_prepared_search", "")
+		link, err := preparation.soulseekLink(ssCtx)
+		end(err)
+		if err == nil {
+			soulseekHandled = true
+			if link != "" {
+				o.log("Downloading the Soulseek match found while dragging...")
+				args := []string{link, "-o", ssOut, "--format", "mp3"}
+				args = append(args, sockseekProgressArgs(o)...)
+				args = append(args, sockseekBaseArgs(o)...)
+				err = runStream(ssCtx, o, args...)
+			}
+			if err != nil || len(walkAudio(ssOut)) == 0 {
+				missing = allMissing(tracks)
+			}
+			if len(missing) > 0 && o.UseFallback {
+				fallback(ctx, o, missing, ytOut, prepared)
+			}
+		}
+	}
+	if soulseekHandled {
+		// The prepared result already completed the source/fallback decision.
+	} else if o.SkipSoulseek {
 		o.log("Soulseek is marked as unavailable; using the fallback directly")
 		missing = allMissing(tracks)
 		if o.UseFallback {
@@ -256,7 +289,7 @@ func Run(ctx context.Context, o *Options) (result *Result, runErr error) {
 		}
 	}
 
-	if !useAlbumMode && len(missing) == 0 {
+	if !soulseekHandled && !useAlbumMode && len(missing) == 0 {
 		csvPath := filepath.Join(o.WorkDir, safe+".csv")
 		end := timing.Begin(ctx, "soulseek.csv_write", "")
 		err := writeTracksCSV(csvPath, tracks)
@@ -472,6 +505,9 @@ func fallback(ctx context.Context, o *Options, missing []missingTrack, ytOut str
 			end := timing.Begin(ctx, "youtube.wait_for_prepared_search", m.Artist+" - "+m.Title)
 			cands, err = prepared.get(ctx)
 			end(err)
+			if err != nil && ctx.Err() == nil {
+				cands, err = ytdlp.SearchCandidates(ctx, m.Artist, m.Title, m.Duration, 5)
+			}
 		} else {
 			cands, err = ytdlp.SearchCandidates(ctx, m.Artist, m.Title, m.Duration, 5)
 		}
