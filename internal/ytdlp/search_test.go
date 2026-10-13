@@ -77,6 +77,45 @@ const searchFixture = `case "$*" in
 esac
 `
 
+const musicSearchFixture = `case "$*" in
+  *music.youtube.com/search*)
+    echo '{"id":"aaaaaaaaaaa","title":"Song One","artist":"Artist","duration":180}'
+    echo '{"id":"bbbbbbbbbbb","title":"Song Two","channel":"Other Artist - Topic","duration":245.5}'
+    echo '{"id":"UCtHVFWQtBzPt8m0J9e59TSQ","url":"https://music.youtube.com/browse/UCtHVFWQtBzPt8m0J9e59TSQ","ie_key":"YoutubeTab"}'
+    echo '{"id":"aaaaaaaaaaa","title":"Song One","artist":"Artist","duration":180}'
+    ;;
+  *)
+    echo unexpected-call >&2
+    exit 1
+    ;;
+esac
+`
+
+func TestSearchMusicReturnsFlatResultsInOrder(t *testing.T) {
+	fakeSearchBinary(t, musicSearchFixture)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cands, err := SearchMusic(ctx, "artist song", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cands) != 2 || cands[0].ID != "aaaaaaaaaaa" || cands[1].ID != "bbbbbbbbbbb" {
+		t.Fatalf("incorrect results: %+v", cands)
+	}
+	if cands[1].Artist != "Other Artist - Topic" || cands[1].Duration != 245 {
+		t.Fatalf("incorrect metadata: %+v", cands[1])
+	}
+	if cands[0].URL != "https://www.youtube.com/watch?v=aaaaaaaaaaa" {
+		t.Fatalf("incorrect url: %s", cands[0].URL)
+	}
+}
+
+func TestSearchMusicRejectsEmptyQuery(t *testing.T) {
+	if _, err := SearchMusic(context.Background(), "   ", 20); err == nil {
+		t.Fatal("accepted empty query")
+	}
+}
+
 func TestSearchConcurrentShortlistPreservesFullScoringAndTies(t *testing.T) {
 	dir := fakeSearchBinary(t, searchFixture)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

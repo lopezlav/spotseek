@@ -1,17 +1,62 @@
 # Spotseek
 
-A small desktop app that downloads a public Spotify **playlist**, **album**, or
-**track** as mp3 files. It reads the track list from Spotify, downloads from
-Soulseek with Sockseek, fills the gaps from YouTube Music, and normalizes every
-file to mp3 at the bitrate you choose. FLAC is never used.
+A small desktop app that downloads music as mp3 files. Paste a public Spotify
+**playlist**, **album**, or **track** link, or **search YouTube Music** and pick
+a result. Tracks download from Soulseek first, the gaps are filled from YouTube
+Music, and every file is normalized to mp3 at the bitrate you choose. FLAC is
+never used.
+
+The official downloads bundle all the tools the app needs (sockseek, yt-dlp,
+ffmpeg, ffprobe). The only extra thing you need is a **Soulseek account** for
+the Soulseek route.
+
+## Install from the GitHub releases page
+
+### macOS (Apple Silicon)
+
+1. Download `Spotseek-macOS-arm64.zip` from the latest release.
+2. Unzip it and drag **Spotseek** into `/Applications`.
+3. The app is not signed, so macOS blocks the first start. Right-click the
+   app and choose **Open**, or run this once:
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/Spotseek.app
+   ```
+
+The download is for Apple Silicon Macs (M1 and newer). On an Intel Mac,
+install the tools with Homebrew and build from source (see below).
+
+### Windows
+
+1. Download `Spotseek-Setup-<version>.exe` from the latest release.
+2. Run it and follow the setup steps. The tools are installed with the app,
+   in the `bin` folder next to the program.
+
+Windows may show a blue SmartScreen warning because the app is not signed.
+Choose **More info**, then **Run anyway**.
+
+## Soulseek account
+
+Downloads try Soulseek first, through the bundled sockseek tool. Soulseek
+needs an account:
+
+1. Install the free [Soulseek](https://www.slsknet.org/news/) client or
+   [Nicotine+](https://nicotine-plus.org/) once and create an account.
+2. In Spotseek, open **Download**, open the **Soulseek account** section, and
+   type your username and password.
+
+You do not need the official Soulseek app after that; sockseek does the
+downloading. Without an account, every track falls back to YouTube Music, and
+the **YouTube** tab works without any account at all.
 
 ## Requirements
 
-The app calls these tools, so they must be on the machine:
+Nothing must be installed when you use the official downloads. If you build
+the app yourself, these tools must be on the machine, because the self-built
+app has no bundled copies:
 
 - **Sockseek** - the Soulseek downloader. A Soulseek account must be set in
   `~/.config/sockseek/sockseek.conf` (or typed in the app).
-- **yt-dlp** - for the YouTube Music fallback.
+- **yt-dlp** - for the YouTube Music search and fallback.
 - **ffmpeg** and **ffprobe** - for the mp3 normalization.
 
 On macOS:
@@ -21,16 +66,11 @@ brew install yt-dlp ffmpeg
 # Sockseek: download a release, or build the sockseek repo
 ```
 
-## Install on macOS
+## Search YouTube Music (no account)
 
-The app is installed at `/Applications/Spotseek.app`.
-
-The app is not signed. If macOS blocks the first start, right-click the app and
-choose **Open**, or run:
-
-```bash
-xattr -dr com.apple.quarantine /Applications/Spotseek.app
-```
+The **YouTube** tab searches YouTube Music directly. Type a song, an artist,
+or a few words from the title, press **Search**, and download the result you
+pick. Nothing is read from Spotify and no account is needed.
 
 ## Build on macOS
 
@@ -41,31 +81,49 @@ go build -o /tmp/spotseek-app .
 $(go env GOPATH)/bin/fyne package -os darwin -name Spotseek -appVersion 1.0.0
 ```
 
+To bundle the tools into an .app yourself:
+
+```bash
+scripts/fetch-tools.sh build/bin darwin-arm64
+cp -R build/bin Spotseek.app/Contents/Resources/bin
+```
+
 ## Build on Windows
 
 Fyne uses cgo and OpenGL, so a Windows `.exe` **cannot be cross-compiled from
 macOS**. Build it on a Windows machine:
 
 1. Install Go, a C compiler (MSYS2 mingw-w64 gcc, or TDM-GCC), and the Fyne CLI:
-   ```bat
-   go install fyne.io/tools/cmd/fyne@latest
-   ```
+    ```bat
+    go install fyne.io/tools/cmd/fyne@latest
+    ```
 2. Install the tools:
    - Sockseek (Windows release)
    - `yt-dlp.exe`
    - ffmpeg (add `ffmpeg.exe` and `ffprobe.exe` to PATH)
 3. Build:
-   ```bat
-   fyne package -os windows -name Spotseek
-   ```
-   or, without the Fyne CLI:
-   ```bat
-   go build -ldflags -H=windowsgui -o Spotseek.exe .
-   ```
+    ```bat
+    fyne package -os windows -name Spotseek
+    ```
+    or, without the Fyne CLI:
+    ```bat
+    go build -ldflags -H=windowsgui -o Spotseek.exe .
+    ```
 
 The code already handles Windows: the startup `PATH` fix adds the WinGet and
 scoop folders, and **Open folder** uses `explorer`. The Windows build has not
 been tested on a real Windows machine.
+
+## Releases
+
+GitHub Actions builds the downloads whenever a tag like `v1.2.3` is pushed:
+
+- `Spotseek-macOS-arm64.zip` - the .app with all tools bundled.
+- `Spotseek-Setup-<version>.exe` - the Windows installer with all tools bundled.
+
+The workflow also runs manually from the Actions tab and uploads the same
+files as build artifacts. The release is created as a **draft**; publish it
+from the releases page when you are happy with it.
 
 ## Connect Spotify (read-only)
 
@@ -186,4 +244,6 @@ Checks: `go test ./...`, `go vet ./...`, and
 - `internal/ytdlp` - YouTube Music search, ranking, and download.
 - `internal/pipeline` - runs Sockseek, finds missing tracks, runs the fallback,
   and normalizes to mp3.
+- `scripts` - downloads the bundled tools for packaging.
+- `packaging/windows` - the Inno Setup script for the Windows installer.
 - `main.go` - the Fyne UI and the CLI mode.

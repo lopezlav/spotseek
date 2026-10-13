@@ -49,6 +49,7 @@ var (
 	statusLabel    *widget.Label
 	cancel         context.CancelFunc
 	mainWindow     fyne.Window
+	jobActive      bool
 )
 
 func addLog(s string) {
@@ -62,6 +63,7 @@ func addLog(s string) {
 
 func main() {
 	ensurePath()
+	clearBundledToolQuarantine()
 	if len(os.Args) > 1 && os.Args[1] == "serve" {
 		runServe(os.Args[2:])
 		return
@@ -205,9 +207,11 @@ func main() {
 	refreshSpotify()
 
 	spotifyTab := spotifyHost
+	youtubeTab := buildYouTubeTab(w)
 
 	tabs := container.NewAppTabs(
 		container.NewTabItemWithIcon("Download", theme.DownloadIcon(), linkTab),
+		container.NewTabItemWithIcon("YouTube", theme.SearchIcon(), youtubeTab),
 		container.NewTabItemWithIcon("My Spotify", theme.AccountIcon(), spotifyTab),
 	)
 
@@ -274,6 +278,7 @@ func startRun(input string, coll *spotify.Collection) {
 
 	ctx, c := context.WithCancel(context.Background())
 	cancel = c
+	jobActive = true
 
 	runBtn.Disable()
 	stopBtn.Enable()
@@ -295,6 +300,7 @@ func startRun(input string, coll *spotify.Collection) {
 	go func() {
 		res, err := pipeline.Run(ctx, opts)
 		fyne.Do(func() {
+			jobActive = false
 			progress.Hide()
 			runBtn.Enable()
 			stopBtn.Disable()
@@ -484,7 +490,49 @@ func ensurePath() {
 		}
 		path = dir + string(os.PathListSeparator) + path
 	}
+	// Tools bundled with the app come last, so tools the user installed
+	// themselves keep priority and can override the bundled ones.
+	for _, dir := range bundledToolDirs() {
+		if !strings.Contains(path, dir) {
+			path += string(os.PathListSeparator) + dir
+		}
+	}
 	_ = os.Setenv("PATH", path)
+}
+
+// bundledToolDirs returns the folders that hold sockseek, yt-dlp, ffmpeg, and
+// ffprobe in a packaged app. A macOS .app keeps them in Contents/Resources/bin;
+// a Windows install keeps them in a bin folder next to the executable.
+func bundledToolDirs() []string {
+	exe, err := os.Executable()
+	if err != nil {
+		return nil
+	}
+	exeDir := filepath.Dir(exe)
+	candidates := []string{filepath.Join(exeDir, "bin")}
+	if runtime.GOOS == "darwin" {
+		candidates = append(candidates, filepath.Join(exeDir, "..", "Resources", "bin"))
+	}
+	var dirs []string
+	for _, dir := range candidates {
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			dirs = append(dirs, dir)
+		}
+	}
+	return dirs
+}
+
+// clearBundledToolQuarantine removes the macOS quarantine flag from the
+// bundled tools. Files downloaded from the internet carry the flag, and macOS
+// kills unsigned flagged binaries when the app starts them. The user already
+// allowed the app itself to run, so the flag on its own tools is not needed.
+func clearBundledToolQuarantine() {
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	for _, dir := range bundledToolDirs() {
+		_ = exec.Command("xattr", "-dr", "com.apple.quarantine", dir).Run()
+	}
 }
 
 // openFolder opens a folder in the system file manager.

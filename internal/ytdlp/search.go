@@ -79,6 +79,40 @@ func parseEntries(out string) []searchEntry {
 	return entries
 }
 
+// SearchMusic searches YouTube Music for a free-text query and returns the
+// flat results in the order the site gives them. No account is needed. The
+// caller picks a result by hand, so candidates are not probed or scored.
+func SearchMusic(ctx context.Context, query string, limit int) ([]Candidate, error) {
+	q := strings.TrimSpace(query)
+	if q == "" {
+		return nil, fmt.Errorf("empty search query")
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	finish := timing.Begin(ctx, "youtube.music_search", q)
+	out, err := runYtDlp(ctx, 90*time.Second, "--skip-download", "--flat-playlist", "--dump-json",
+		"--playlist-end", strconv.Itoa(limit),
+		"https://music.youtube.com/search?q="+url.QueryEscape(q))
+	finish(err)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	var cands []Candidate
+	for _, e := range parseEntries(out) {
+		if !e.isVideo() || seen[e.ID] {
+			continue
+		}
+		seen[e.ID] = true
+		cands = append(cands, e.candidate())
+	}
+	if len(cands) == 0 {
+		return nil, fmt.Errorf("no playable results for %q", q)
+	}
+	return cands, nil
+}
+
 // SearchCandidates searches both sources concurrently and validates full
 // metadata in bounded batches. Flat metadata only orders the shortlist; it
 // never supplies the final score used to select a download.

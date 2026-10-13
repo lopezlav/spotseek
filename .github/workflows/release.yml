@@ -1,0 +1,149 @@
+name: Release
+
+# Builds the app with all tools bundled and attaches the downloads to a
+# GitHub release. Push a tag like v1.2.3 to run it; "Run workflow" builds
+# the same artifacts without creating a release.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    name: macOS (Apple Silicon)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install fyne CLI
+        run: go install fyne.io/tools/cmd/fyne@v2.8.1
+
+      - name: Derive version
+        id: ver
+        run: |
+          if [[ "$GITHUB_REF_NAME" =~ ^v[0-9] ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download bundled tools
+        run: ./scripts/fetch-tools.sh build/bin darwin-arm64
+
+      - name: Check out sockseek
+        uses: actions/checkout@v4
+        with:
+          repository: fiso64/sockseek
+          path: sockseek
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Build sockseek
+        run: >
+          dotnet publish sockseek/Sockseek.Cli -c Release -f net10.0 -r osx-arm64
+          -o "$PWD/build/bin" -p:PublishSingleFile=true -p:PublishTrimmed=false
+          -p:DebugType=embedded --self-contained true
+          && rm -f build/bin/*.pdb
+
+      - name: Package app
+        run: |
+          "$(go env GOPATH)/bin/fyne" package -os darwin -name Spotseek \
+            -appVersion "${{ steps.ver.outputs.version }}" -appBuild "${{ github.run_number }}"
+          cp -R build/bin Spotseek.app/Contents/Resources/bin
+          ditto -c -k --sequesterRsrc --keepParent Spotseek.app Spotseek-macOS-arm64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Spotseek-macOS-arm64
+          path: Spotseek-macOS-arm64.zip
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: Spotseek-macOS-arm64.zip
+
+  windows:
+    name: Windows (x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install fyne CLI
+        run: go install fyne.io/tools/cmd/fyne@v2.8.1
+
+      - name: Derive version
+        id: ver
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_NAME" =~ ^v[0-9] ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download bundled tools
+        shell: pwsh
+        run: ./scripts/fetch-tools.ps1 -OutDir build/bin -Platform win-x64
+
+      - name: Check out sockseek
+        uses: actions/checkout@v4
+        with:
+          repository: fiso64/sockseek
+          path: sockseek
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Build sockseek
+        run: >
+          dotnet publish sockseek/Sockseek.Cli -c Release -f net10.0 -r win-x64
+          -o "${{ github.workspace }}\build\bin" -p:PublishSingleFile=true
+          -p:PublishTrimmed=false -p:DebugType=embedded --self-contained true
+
+      - name: Package app
+        shell: pwsh
+        run: |
+          "$(go env GOPATH)/bin/fyne.exe" package -os windows -name Spotseek `
+            -appVersion "${{ steps.ver.outputs.version }}" -appBuild "${{ github.run_number }}"
+          New-Item -ItemType Directory -Force -Path build\windows | Out-Null
+          if (Test-Path Spotseek.zip) {
+            Expand-Archive Spotseek.zip -DestinationPath build\windows
+          } else {
+            Copy-Item Spotseek.exe build\windows\Spotseek.exe
+          }
+
+      - name: Build installer
+        shell: pwsh
+        run: >
+          New-Item -ItemType Directory -Force -Path build\installer | Out-Null;
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          /DAppVersion="${{ steps.ver.outputs.version }}" packaging\windows\spotseek.iss
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Spotseek-Setup-windows
+          path: build/installer/Spotseek-Setup-*.exe
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: build/installer/Spotseek-Setup-*.exe
