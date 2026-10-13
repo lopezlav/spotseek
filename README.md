@@ -76,7 +76,7 @@ pick. Nothing is read from Spotify and no account is needed.
 
 ```bash
 cd spotseek-app
-go install fyne.io/tools/cmd/fyne@latest   # once
+go install fyne.io/fyne/v2/cmd/fyne@latest   # once
 go build -o /tmp/spotseek-app .
 $(go env GOPATH)/bin/fyne package -os darwin -name Spotseek -appVersion 1.0.0
 ```
@@ -95,7 +95,7 @@ macOS**. Build it on a Windows machine:
 
 1. Install Go, a C compiler (MSYS2 mingw-w64 gcc, or TDM-GCC), and the Fyne CLI:
     ```bat
-    go install fyne.io/tools/cmd/fyne@latest
+    go install fyne.io/fyne/v2/cmd/fyne@latest
     ```
 2. Install the tools:
    - Sockseek (Windows release)

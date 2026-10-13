@@ -24,7 +24,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Install fyne CLI
-        run: go install fyne.io/tools/cmd/fyne@v2.8.1
+        run: go install fyne.io/fyne/v2/cmd/fyne@v2.8.1
 
       - name: Derive version
         id: ver
@@ -85,7 +85,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Install fyne CLI
-        run: go install fyne.io/tools/cmd/fyne@v2.8.1
+        run: go install fyne.io/fyne/v2/cmd/fyne@v2.8.1
 
       - name: Derive version
         id: ver
