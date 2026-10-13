@@ -50,7 +50,8 @@ jobs:
 
       - name: Build sockseek
         run: >
-          dotnet publish sockseek/Sockseek.Cli -c Release -f net10.0 -r osx-arm64
+          dotnet restore sockseek/Sockseek.sln
+          && dotnet publish sockseek/Sockseek.Cli -c Release -f net10.0 -r osx-arm64
           -o "$PWD/build/bin" -p:PublishSingleFile=true -p:PublishTrimmed=false
           -p:DebugType=embedded --self-contained true
           && rm -f build/bin/*.pdb
@@ -113,7 +114,8 @@ jobs:
 
       - name: Build sockseek
         run: >
-          dotnet publish sockseek/Sockseek.Cli -c Release -f net10.0 -r win-x64
+          dotnet restore sockseek/Sockseek.sln
+          && dotnet publish sockseek/Sockseek.Cli -c Release -f net10.0 -r win-x64
           -o "${{ github.workspace }}\build\bin" -p:PublishSingleFile=true
           -p:PublishTrimmed=false -p:DebugType=embedded --self-contained true
 

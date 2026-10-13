@@ -28,5 +28,5 @@ curl.exe -fL --retry 3 -o "$OutDir\ffmpeg.exe"  "$ffmpegBase/$($build.ffmpeg)"
 curl.exe -fL --retry 3 -o "$OutDir\ffprobe.exe" "$ffmpegBase/$($build.ffprobe)"
 curl.exe -fL --retry 3 -o "$OutDir\yt-dlp.exe"  "$ytdlpBase/$($build.ytdlp)"
 
-Write-Host "tools ready in $OutDir:"
+Write-Host "tools ready in ${OutDir}:"
 Get-ChildItem $OutDir
