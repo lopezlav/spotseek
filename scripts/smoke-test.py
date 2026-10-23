@@ -11,7 +11,7 @@ bin_dir = Path(sys.argv[1]).resolve()
 app = Path(sys.argv[2]).resolve()
 ext = '.exe' if sys.platform == 'win32' else ''
 env = os.environ.copy()
-system_path = str(Path(env['SystemRoot']) / 'System32') if ext else '/usr/bin:/bin'
+system_path = str(Path(os.environ['SystemRoot']) / 'System32') if ext else '/usr/bin:/bin'
 env['PATH'] = str(bin_dir) + os.pathsep + system_path
 
 def run(args):

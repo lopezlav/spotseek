@@ -131,9 +131,9 @@ draft from the releases page after checking the downloads.
 
 ```bash
 gh workflow run release.yml --ref main -f version=0.1.0
-# After the dry run passes, create a draft release:
-git tag v0.1.0
-git push origin v0.1.0
+# Build, verify, and prepare a draft from the selected commit:
+gh workflow run release.yml --ref main -f version=0.1.0 -f draft_release=true
+# Alternatively, pushing a v0.1.0 tag also builds a draft.
 ```
 
 The workflow pins sockseek to a source commit. Downloaded tools are pinned by
