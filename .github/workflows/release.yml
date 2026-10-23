@@ -169,4 +169,5 @@ jobs:
           files: |
             dist/*
             THIRD_PARTY_NOTICES.md
+            LICENSE
             packaging/tools.json

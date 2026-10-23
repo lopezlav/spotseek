@@ -141,6 +141,7 @@ version and SHA-256 in `packaging/tools.json`; changing a tool requires updating
 its checksum and testing a new manual build. CI also runs tests and vet on
 macOS and Windows for pushes and pull requests.
 
+Spotseek's own code is licensed under [MIT](LICENSE).
 See [third-party notices](THIRD_PARTY_NOTICES.md) for bundled licenses and
 source references. These are also included inside both installers.
 

@@ -25,5 +25,6 @@ can break or encounter rate limits. Automated tests cover packaging, tool startu
 MP3 encoding, and Windows installation/uninstallation; interactive Windows use
 still needs a human check. Use the app only for content you are authorized to download.
 
-Third-party licenses, exact tool versions, and source references are included in
+Spotseek's own code is MIT licensed. Third-party licenses, exact tool versions,
+and source references are included in
 the app's `licenses` directory (macOS: `Contents/Resources/licenses`).
