@@ -15,9 +15,10 @@ system_path = str(Path(env['SystemRoot']) / 'System32') if ext else '/usr/bin:/b
 env['PATH'] = str(bin_dir) + os.pathsep + system_path
 
 def run(args):
-    result = subprocess.run([str(a) for a in args], env=env, check=True,
+    result = subprocess.run([str(a) for a in args], env=env, check=False,
                             capture_output=True, text=True, timeout=60)
     print((result.stdout + result.stderr)[:2000], flush=True)
+    result.check_returncode()
     return result.stdout
 
 for tool, flag in [('sockseek', '--help'), ('yt-dlp', '--version'), ('deno', '--version'),

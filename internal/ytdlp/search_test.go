@@ -47,7 +47,7 @@ func fakeSearchBinary(t *testing.T, script string) string {
 }
 
 const searchFixture = `case "$*" in
-  *music.youtube.com/search*)
+  *music.youtube.com/search*#songs)
     echo started > music-started
     while [ ! -f video-started ]; do sleep .01; done
     echo '{"id":"aaaaaaaaaaa","title":"Song","artist":"Artist","duration":180}'
@@ -78,7 +78,7 @@ esac
 `
 
 const musicSearchFixture = `case "$*" in
-  *music.youtube.com/search*)
+  *music.youtube.com/search*#songs)
     echo '{"id":"aaaaaaaaaaa","title":"Song One","artist":"Artist","duration":180}'
     echo '{"id":"bbbbbbbbbbb","title":"Song Two","channel":"Other Artist - Topic","duration":245.5}'
     echo '{"id":"UCtHVFWQtBzPt8m0J9e59TSQ","url":"https://music.youtube.com/browse/UCtHVFWQtBzPt8m0J9e59TSQ","ie_key":"YoutubeTab"}'

@@ -79,6 +79,12 @@ func parseEntries(out string) []searchEntry {
 	return entries
 }
 
+// Ask yt-dlp for the songs section so albums and channels cannot consume the
+// result limit before playable tracks are considered.
+func musicSearchURL(query string) string {
+	return "https://music.youtube.com/search?q=" + url.QueryEscape(query) + "#songs"
+}
+
 // SearchMusic searches YouTube Music for a free-text query and returns the
 // flat results in the order the site gives them. No account is needed. The
 // caller picks a result by hand, so candidates are not probed or scored.
@@ -93,7 +99,7 @@ func SearchMusic(ctx context.Context, query string, limit int) ([]Candidate, err
 	finish := timing.Begin(ctx, "youtube.music_search", q)
 	out, err := runYtDlp(ctx, 90*time.Second, "--skip-download", "--flat-playlist", "--dump-json",
 		"--playlist-end", strconv.Itoa(limit),
-		"https://music.youtube.com/search?q="+url.QueryEscape(q))
+		musicSearchURL(q))
 	finish(err)
 	if err != nil {
 		return nil, err
@@ -133,7 +139,7 @@ func SearchCandidates(ctx context.Context, artist, title string, length, limit i
 		stage string
 		args  []string
 	}{
-		{"youtube.music_search", []string{"--skip-download", "--flat-playlist", "--dump-json", "--playlist-end", strconv.Itoa(limit), "https://music.youtube.com/search?q=" + url.QueryEscape(q)}},
+		{"youtube.music_search", []string{"--skip-download", "--flat-playlist", "--dump-json", "--playlist-end", strconv.Itoa(limit), musicSearchURL(q)}},
 		{"youtube.video_search", []string{"--skip-download", "--flat-playlist", "--dump-json", fmt.Sprintf("ytsearch%d:%s", limit, q)}},
 	}
 	for i, source := range sources {
