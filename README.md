@@ -7,17 +7,17 @@ Music, and every file is normalized to mp3 at the bitrate you choose. FLAC is
 never used.
 
 The official downloads bundle all the tools the app needs (sockseek, yt-dlp,
-ffmpeg, ffprobe). The only extra thing you need is a **Soulseek account** for
+ffmpeg, ffprobe, and Deno). The only extra thing you need is a **Soulseek account** for
 the Soulseek route.
 
-## Install from the GitHub releases page
+## Install from the [GitHub releases page](https://github.com/lopezlav/spotseek/releases)
 
 ### macOS (Apple Silicon)
 
 1. Download `Spotseek-macOS-arm64.zip` from the latest release.
 2. Unzip it and drag **Spotseek** into `/Applications`.
-3. The app is not signed, so macOS blocks the first start. Right-click the
-   app and choose **Open**, or run this once:
+3. The app is not notarized by Apple. If macOS blocks the first start, use
+   **System Settings → Privacy & Security → Open Anyway**, or run this once:
    ```bash
    xattr -dr com.apple.quarantine /Applications/Spotseek.app
    ```
@@ -58,11 +58,12 @@ app has no bundled copies:
   `~/.config/sockseek/sockseek.conf` (or typed in the app).
 - **yt-dlp** - for the YouTube Music search and fallback.
 - **ffmpeg** and **ffprobe** - for the mp3 normalization.
+- **Deno** - JavaScript runtime needed by yt-dlp for full YouTube support.
 
 On macOS:
 
 ```bash
-brew install yt-dlp ffmpeg
+brew install yt-dlp ffmpeg deno
 # Sockseek: download a release, or build the sockseek repo
 ```
 
@@ -76,12 +77,13 @@ pick. Nothing is read from Spotify and no account is needed.
 
 ```bash
 cd spotseek-app
-go install fyne.io/fyne/v2/cmd/fyne@latest   # once
+go install fyne.io/fyne/v2/cmd/fyne@v2.8.1   # once
 go build -o /tmp/spotseek-app .
 $(go env GOPATH)/bin/fyne package -os darwin -name Spotseek -appVersion 1.0.0
 ```
 
-To bundle the tools into an .app yourself:
+To bundle the tools into an .app yourself (Python 3 is needed on the build
+machine only; also copy a self-contained sockseek build into `build/bin`):
 
 ```bash
 scripts/fetch-tools.sh build/bin darwin-arm64
@@ -95,7 +97,7 @@ macOS**. Build it on a Windows machine:
 
 1. Install Go, a C compiler (MSYS2 mingw-w64 gcc, or TDM-GCC), and the Fyne CLI:
     ```bat
-    go install fyne.io/fyne/v2/cmd/fyne@latest
+    go install fyne.io/fyne/v2/cmd/fyne@v2.8.1
     ```
 2. Install the tools:
    - Sockseek (Windows release)
@@ -111,8 +113,9 @@ macOS**. Build it on a Windows machine:
     ```
 
 The code already handles Windows: the startup `PATH` fix adds the WinGet and
-scoop folders, and **Open folder** uses `explorer`. The Windows build has not
-been tested on a real Windows machine.
+scoop folders, and **Open folder** uses `explorer`. Release builds test silent installation, tool startup, MP3 encoding, and
+uninstallation on a Windows runner. Interactive desktop use still needs a
+human check.
 
 ## Releases
 
@@ -122,8 +125,24 @@ GitHub Actions builds the downloads whenever a tag like `v1.2.3` is pushed:
 - `Spotseek-Setup-<version>.exe` - the Windows installer with all tools bundled.
 
 The workflow also runs manually from the Actions tab and uploads the same
-files as build artifacts. The release is created as a **draft**; publish it
-from the releases page when you are happy with it.
+files as build artifacts. Both platform builds, tests, and smoke tests must
+pass before a **draft** release is created, with `SHA256SUMS.txt`. Publish the
+draft from the releases page after checking the downloads.
+
+```bash
+gh workflow run release.yml --ref main -f version=0.1.0
+# After the dry run passes, create a draft release:
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The workflow pins sockseek to a source commit. Downloaded tools are pinned by
+version and SHA-256 in `packaging/tools.json`; changing a tool requires updating
+its checksum and testing a new manual build. CI also runs tests and vet on
+macOS and Windows for pushes and pull requests.
+
+See [third-party notices](THIRD_PARTY_NOTICES.md) for bundled licenses and
+source references. These are also included inside both installers.
 
 ## Connect Spotify (read-only)
 

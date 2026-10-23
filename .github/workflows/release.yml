@@ -1,151 +1,172 @@
 name: Release
 
-# Builds the app with all tools bundled and attaches the downloads to a
-# GitHub release. Push a tag like v1.2.3 to run it; "Run workflow" builds
-# the same artifacts without creating a release.
 on:
   push:
-    tags:
-      - "v*"
+    tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      version:
+        description: Artifact version (manual builds do not create a release)
+        default: "0.1.0"
+        required: true
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  macos:
-    name: macOS (Apple Silicon)
-    runs-on: macos-latest
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      sockseek: ${{ steps.meta.outputs.sockseek }}
     steps:
       - uses: actions/checkout@v4
+      - id: meta
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          version = os.environ['GITHUB_REF_NAME'][1:] if os.environ['GITHUB_REF_TYPE'] == 'tag' else os.environ['INPUT_VERSION']
+          if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version):
+              raise SystemExit('Use a version like 0.1.0 (tag v0.1.0)')
+          tools = json.load(open('packaging/tools.json'))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write(f"version={version}\nsockseek={tools['versions']['sockseek']}\n")
+          PY
 
+  build:
+    needs: prepare
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS (Apple Silicon)
+            runner: macos-latest
+            platform: darwin-arm64
+            rid: osx-arm64
+            artifact: Spotseek-macOS-arm64
+          - name: Windows (x64)
+            runner: windows-latest
+            platform: win-x64
+            rid: win-x64
+            artifact: Spotseek-Setup-windows
+    env:
+      APP_VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-
-      - name: Install fyne CLI
-        run: go install fyne.io/fyne/v2/cmd/fyne@v2.8.1
-
-      - name: Derive version
-        id: ver
-        run: |
-          if [[ "$GITHUB_REF_NAME" =~ ^v[0-9] ]]; then
-            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=0.0.0" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Download bundled tools
-        run: ./scripts/fetch-tools.sh build/bin darwin-arm64
-
-      - name: Check out sockseek
-        uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          repository: fiso64/sockseek
-          path: sockseek
-
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 10.0.x
-
-      - name: Build sockseek
-        run: >
-          dotnet restore sockseek/Sockseek.sln
-          && dotnet publish sockseek/Sockseek.Cli -c Release -f net10.0 -r osx-arm64
-          -o "$PWD/build/bin" -p:PublishSingleFile=true -p:PublishTrimmed=false
-          -p:DebugType=embedded --self-contained true
-          && rm -f build/bin/*.pdb
-
-      - name: Package app
-        run: |
-          "$(go env GOPATH)/bin/fyne" package -os darwin -name Spotseek \
-            -appVersion "${{ steps.ver.outputs.version }}" -appBuild "${{ github.run_number }}"
-          cp -R build/bin Spotseek.app/Contents/Resources/bin
-          ditto -c -k --sequesterRsrc --keepParent Spotseek.app Spotseek-macOS-arm64.zip
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Spotseek-macOS-arm64
-          path: Spotseek-macOS-arm64.zip
-
-      - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          draft: true
-          files: Spotseek-macOS-arm64.zip
-
-  windows:
-    name: Windows (x64)
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - name: Install fyne CLI
-        run: go install fyne.io/fyne/v2/cmd/fyne@v2.8.1
-
-      - name: Derive version
-        id: ver
+          python-version: "3.13"
+      - name: Test and vet
         shell: bash
         run: |
-          if [[ "$GITHUB_REF_NAME" =~ ^v[0-9] ]]; then
-            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=0.0.0" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Download bundled tools
-        shell: pwsh
-        run: ./scripts/fetch-tools.ps1 -OutDir build/bin -Platform win-x64
-
-      - name: Check out sockseek
+          go test -tags ci ./...
+          go vet -tags ci ./...
+      - name: Install fyne CLI
+        run: go install fyne.io/fyne/v2/cmd/fyne@v2.8.1
+      - name: Download verified bundled tools
+        run: python scripts/fetch-tools.py build/bin ${{ matrix.platform }}
+      - name: Check out pinned sockseek
         uses: actions/checkout@v4
         with:
           repository: fiso64/sockseek
+          ref: ${{ needs.prepare.outputs.sockseek }}
           path: sockseek
-
+          persist-credentials: false
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
-
       - name: Build sockseek
-        run: >
+        shell: bash
+        run: |
           dotnet restore sockseek/Sockseek.sln
-          && dotnet publish sockseek/Sockseek.Cli -c Release -f net10.0 -r win-x64
-          -o "${{ github.workspace }}\build\bin" -p:PublishSingleFile=true
-          -p:PublishTrimmed=false -p:DebugType=embedded --self-contained true
-
-      - name: Package app
+          dotnet publish sockseek/Sockseek.Cli -c Release -f net10.0 -r ${{ matrix.rid }} \
+            -o "$PWD/build/bin" -p:PublishSingleFile=true -p:PublishTrimmed=false \
+            -p:DebugType=embedded --self-contained true
+          rm -f build/bin/*.pdb
+      - name: Collect third-party notices
+        run: python scripts/collect-notices.py build/notices ${{ matrix.platform }}
+      - name: Package and test macOS app
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          test "$(uname -m)" = arm64
+          "$(go env GOPATH)/bin/fyne" package -os darwin -name Spotseek \
+            -appID io.github.lopezlav.spotseek -appVersion "$APP_VERSION" -appBuild "$GITHUB_RUN_NUMBER"
+          cp -R build/bin Spotseek.app/Contents/Resources/bin
+          cp -R build/notices Spotseek.app/Contents/Resources/licenses
+          codesign --force --deep --sign - Spotseek.app
+          codesign --verify --deep --strict Spotseek.app
+          python scripts/smoke-test.py Spotseek.app/Contents/Resources/bin Spotseek.app/Contents/MacOS/spotseek-app
+          mkdir -p build/artifacts
+          ditto -c -k --sequesterRsrc --keepParent Spotseek.app build/artifacts/Spotseek-macOS-arm64.zip
+      - name: Package Windows app
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          "$(go env GOPATH)/bin/fyne.exe" package -os windows -name Spotseek `
-            -appVersion "${{ steps.ver.outputs.version }}" -appBuild "${{ github.run_number }}"
-          New-Item -ItemType Directory -Force -Path build\windows | Out-Null
-          if (Test-Path Spotseek.zip) {
-            Expand-Archive Spotseek.zip -DestinationPath build\windows
-          } else {
-            Copy-Item Spotseek.exe build\windows\Spotseek.exe
-          }
-
-      - name: Build installer
+          & "$(go env GOPATH)/bin/fyne.exe" package -os windows -name Spotseek `
+            -appID io.github.lopezlav.spotseek -appVersion $env:APP_VERSION -appBuild $env:GITHUB_RUN_NUMBER
+          if ($LASTEXITCODE -ne 0) { throw "Fyne packaging failed" }
+          New-Item -ItemType Directory -Force -Path build/windows | Out-Null
+          Copy-Item Spotseek.exe build/windows/Spotseek.exe
+      - name: Build and test Windows installer
+        if: runner.os == 'Windows'
         shell: pwsh
-        run: >
-          New-Item -ItemType Directory -Force -Path build\installer | Out-Null;
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          /DAppVersion="${{ steps.ver.outputs.version }}" packaging\windows\spotseek.iss
-
+        run: |
+          New-Item -ItemType Directory -Force -Path build/installer | Out-Null
+          & "C:/Program Files (x86)/Inno Setup 6/ISCC.exe" "/DAppVersion=$env:APP_VERSION" packaging/windows/spotseek.iss
+          if ($LASTEXITCODE -ne 0) { throw "Installer compilation failed" }
+          $installer = (Get-ChildItem build/installer/Spotseek-Setup-*.exe).FullName
+          $target = Join-Path $env:RUNNER_TEMP "Spotseek smoke test"
+          $install = Start-Process -FilePath $installer -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', "/DIR=`"$target`"") -PassThru -Wait
+          if ($install.ExitCode -ne 0) { throw "Installer exited $($install.ExitCode)" }
+          python scripts/smoke-test.py "$target/bin" "$target/Spotseek.exe"
+          if ($LASTEXITCODE -ne 0) { throw "Installed app smoke test failed" }
+          if (!(Test-Path "$target/licenses/THIRD_PARTY_NOTICES.md")) { throw "Missing installed notices" }
+          $uninstall = Start-Process -FilePath "$target/unins000.exe" -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -PassThru -Wait
+          if ($uninstall.ExitCode -ne 0) { throw "Uninstaller exited $($uninstall.ExitCode)" }
+          New-Item -ItemType Directory -Force -Path build/artifacts | Out-Null
+          Copy-Item $installer build/artifacts/
       - uses: actions/upload-artifact@v4
         with:
-          name: Spotseek-Setup-windows
-          path: build/installer/Spotseek-Setup-*.exe
+          name: ${{ matrix.artifact }}
+          path: build/artifacts/*
+          if-no-files-found: error
 
-      - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/')
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum Spotseek* > SHA256SUMS.txt
+      - name: Create complete draft release
         uses: softprops/action-gh-release@v2
         with:
           draft: true
-          files: build/installer/Spotseek-Setup-*.exe
+          name: Spotseek ${{ needs.prepare.outputs.version }}
+          body_path: packaging/RELEASE_NOTES.md
+          fail_on_unmatched_files: true
+          files: |
+            dist/*
+            THIRD_PARTY_NOTICES.md
+            packaging/tools.json

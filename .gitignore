@@ -1,3 +1,8 @@
 Spotseek.app/
 spotseek-app
 *.app
+build/
+sockseek/
+Spotseek*.exe
+Spotseek*.zip
+__pycache__/

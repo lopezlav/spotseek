@@ -1,0 +1,24 @@
+name: CI
+on:
+  push:
+    branches: [main, feature/progressive-downloads]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Test
+        run: go test -tags ci ./...
+      - name: Vet
+        run: go vet -tags ci ./...

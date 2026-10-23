@@ -22,6 +22,9 @@ func TestBundledToolDirsFindBundleLayout(t *testing.T) {
 		t.Fatal(err)
 	}
 	exe := filepath.Join(exeDir, "spotseek-app")
+	if runtime.GOOS == "windows" {
+		exe += ".exe"
+	}
 	testExe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
