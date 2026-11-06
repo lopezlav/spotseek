@@ -6,6 +6,12 @@ a result. Tracks download from Soulseek first, the gaps are filled from YouTube
 Music, and every file is normalized to mp3 at the bitrate you choose. FLAC is
 never used.
 
+The app opens one simple window: paste a link, watch it search and download,
+then get a poster of the tracks. **CLASSIC WINDOW** (bottom right) opens the
+older window with the YouTube Music search and the My Spotify library.
+
+![The app window](docs/screenshots/5-downloading.png)
+
 The official downloads bundle all the tools the app needs (sockseek, yt-dlp,
 ffmpeg, ffprobe, and Deno). The only extra thing you need is a **Soulseek account** for
 the Soulseek route.
@@ -69,25 +75,52 @@ brew install yt-dlp ffmpeg deno
 
 ## Search YouTube Music (no account)
 
-The **YouTube** tab searches YouTube Music directly. Type a song, an artist,
+Open **CLASSIC WINDOW** from the bottom right of the app. Its **YouTube** tab searches YouTube Music directly. Type a song, an artist,
 or a few words from the title, press **Search**, and download the result you
 pick. Nothing is read from Spotify and no account is needed.
 
-## Build on macOS
+## The app window (Rune UI)
+
+The window is `ui/`, written in Rust with [Rune](https://github.com/anomalyco/rune).
+It does no downloading itself: it runs the Go program as its backend,
+`spotseek-backend --cli <url> -o <dir> --events`. The backend writes one JSON
+event per line (see `internal/pipeline/events.go`) and stops when its stdin
+closes. The window looks for `spotseek-backend` next to its own program; set
+`SPOTSEEK_BACKEND` to use another path.
+
+- The headline and the liquid-metal progress bar are our own shader
+  (`ui/src/liquid.wgsl`) at Rune effect slots. The headline words are signed
+  distance fields (`ui/src/sdf.rs`), so one word can flow into the next.
+- Settings are in `settings.json` in the user's config folder
+  (`~/Library/Application Support/Spotseek` on macOS, `%APPDATA%\Spotseek` on
+  Windows). The Soulseek password is never saved.
+
+Development helpers:
 
 ```bash
-cd spotseek-app
-go install fyne.io/fyne/v2/cmd/fyne@v2.8.1   # once
-go build -o /tmp/spotseek-app .
-$(go env GOPATH)/bin/fyne package -os darwin -name Spotseek -appVersion 1.0.0
+cd ui
+cargo test --release
+# Render one screen headless (scenes: pasted invalid searching downloading done failed settings)
+cargo run --release -- --snap out.png --scene downloading --size 1100x780 --scale 2
+# A scripted download with no backend and no network, recorded as video
+SPOTSEEK_DEMO=1 cargo run --release -- --script scripts/demo.json --video demo.mp4 --size 1100x780
 ```
 
-To bundle the tools into an .app yourself (Python 3 is needed on the build
-machine only; also copy a self-contained sockseek build into `build/bin`):
+## Build on macOS
+
+Rust (stable), Go, and the Xcode command line tools are needed.
+
+```bash
+ui/package-mac.sh            # builds ui/target/Spotseek.app
+ui/package-mac.sh --install  # also replaces /Applications/Spotseek.app (old app to the Trash)
+```
+
+To bundle the tools into the .app (Python 3 is needed on the build machine
+only; also copy a self-contained sockseek build into `build/bin`), run this
+before `package-mac.sh`:
 
 ```bash
 scripts/fetch-tools.sh build/bin darwin-arm64
-cp -R build/bin Spotseek.app/Contents/Resources/bin
 ```
 
 ## Build on Windows
@@ -95,22 +128,19 @@ cp -R build/bin Spotseek.app/Contents/Resources/bin
 Fyne uses cgo and OpenGL, so a Windows `.exe` **cannot be cross-compiled from
 macOS**. Build it on a Windows machine:
 
-1. Install Go, a C compiler (MSYS2 mingw-w64 gcc, or TDM-GCC), and the Fyne CLI:
-    ```bat
-    go install fyne.io/fyne/v2/cmd/fyne@v2.8.1
-    ```
+1. Install Go, a C compiler (MSYS2 mingw-w64 gcc, or TDM-GCC), and Rust
+   (stable, MSVC toolchain).
 2. Install the tools:
    - Sockseek (Windows release)
    - `yt-dlp.exe`
    - ffmpeg (add `ffmpeg.exe` and `ffprobe.exe` to PATH)
-3. Build:
+3. Build the backend and the window, and put them in one folder:
     ```bat
-    fyne package -os windows -name Spotseek
+    go build -o spotseek-backend.exe .
+    cd ui && cargo build --release
+    copy target\release\spotseek.exe ..\Spotseek.exe
     ```
-    or, without the Fyne CLI:
-    ```bat
-    go build -ldflags -H=windowsgui -o Spotseek.exe .
-    ```
+    Keep `spotseek-backend.exe` next to `Spotseek.exe`.
 
 The code already handles Windows: the startup `PATH` fix adds the WinGet and
 scoop folders, and **Open folder** uses `explorer`. Release builds test silent installation, tool startup, MP3 encoding, and
@@ -123,6 +153,9 @@ GitHub Actions builds the downloads whenever a tag like `v1.2.3` is pushed:
 
 - `Spotseek-macOS-arm64.zip` - the .app with all tools bundled.
 - `Spotseek-Setup-<version>.exe` - the Windows installer with all tools bundled.
+
+Both contain the app window (the Rune UI, `Spotseek.app/Contents/MacOS/spotseek`
+or `Spotseek.exe`) and the Go backend next to it (`spotseek-backend`).
 
 The workflow also runs manually from the Actions tab and uploads the same
 files as build artifacts. Both platform builds, tests, and smoke tests must
@@ -139,7 +172,8 @@ gh workflow run release.yml --ref main -f version=0.1.0 -f draft_release=true
 The workflow pins sockseek to a source commit. Downloaded tools are pinned by
 version and SHA-256 in `packaging/tools.json`; changing a tool requires updating
 its checksum and testing a new manual build. CI also runs tests and vet on
-macOS and Windows for pushes and pull requests.
+macOS and Windows for pushes and pull requests, for the Go code and for the
+app window.
 
 Spotseek's own code is licensed under [MIT](LICENSE).
 See [third-party notices](THIRD_PARTY_NOTICES.md) for bundled licenses and
@@ -172,10 +206,11 @@ Spotify rule, not an app setting.
 ## Command line (for testing)
 
 ```bash
-Spotseek.app/Contents/MacOS/spotseek-app --cli "<spotify-url>" -o <dir>
+Spotseek.app/Contents/MacOS/spotseek-backend --cli "<spotify-url>" -o <dir>
 ```
 
-Options: `--bitrate 320`, `--no-fallback`, `--limit N`, `--extract-only`.
+Options: `--bitrate 320`, `--no-fallback`, `--limit N`, `--extract-only`,
+`--events` (JSON events on stdout, used by the app window), `--user NAME --pass-stdin`.
 
 Add `--timings` to log JSON `TIMING` records and include stage durations in
 `_report.json`. Server downloads record these timings in each job's log.
@@ -266,4 +301,5 @@ Checks: `go test ./...`, `go vet ./...`, and
   and normalizes to mp3.
 - `scripts` - downloads the bundled tools for packaging.
 - `packaging/windows` - the Inno Setup script for the Windows installer.
-- `main.go` - the Fyne UI and the CLI mode.
+- `main.go` - the classic Fyne window, the CLI mode, and the server.
+- `ui` - the app window (Rust, Rune).

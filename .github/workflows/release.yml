@@ -72,11 +72,21 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ui
       - name: Test and vet
         shell: bash
         run: |
           go test -tags ci ./...
           go vet -tags ci ./...
+      - name: Test and build the app window (Rune UI)
+        shell: bash
+        working-directory: ui
+        run: |
+          cargo test --release --locked
+          cargo build --release --locked
       - name: Install fyne CLI
         run: go install fyne.io/fyne/v2/cmd/fyne@v2.8.1
       - name: Download verified bundled tools
@@ -108,22 +118,29 @@ jobs:
           test "$(uname -m)" = arm64
           "$(go env GOPATH)/bin/fyne" package -os darwin -name Spotseek \
             -appID io.github.lopezlav.spotseek -appVersion "$APP_VERSION" -appBuild "$GITHUB_RUN_NUMBER"
+          # The app window (Rune UI) is the app; the Go program runs next to it as its backend.
+          mv Spotseek.app/Contents/MacOS/spotseek-app Spotseek.app/Contents/MacOS/spotseek-backend
+          cp ui/target/release/spotseek Spotseek.app/Contents/MacOS/spotseek
+          plutil -replace CFBundleExecutable -string spotseek Spotseek.app/Contents/Info.plist
+          plutil -replace LSMinimumSystemVersion -string 13.0 Spotseek.app/Contents/Info.plist
           cp -R build/bin Spotseek.app/Contents/Resources/bin
           cp -R build/notices Spotseek.app/Contents/Resources/licenses
           codesign --force --deep --sign - Spotseek.app
           codesign --verify --deep --strict Spotseek.app
-          python scripts/smoke-test.py Spotseek.app/Contents/Resources/bin Spotseek.app/Contents/MacOS/spotseek-app
+          python scripts/smoke-test.py Spotseek.app/Contents/Resources/bin Spotseek.app/Contents/MacOS/spotseek Spotseek.app/Contents/MacOS/spotseek-backend
           mkdir -p build/artifacts
           ditto -c -k --sequesterRsrc --keepParent Spotseek.app build/artifacts/Spotseek-macOS-arm64.zip
       - name: Package Windows app
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          & "$(go env GOPATH)/bin/fyne.exe" package -os windows -name Spotseek `
-            -appID io.github.lopezlav.spotseek -appVersion $env:APP_VERSION -appBuild $env:GITHUB_RUN_NUMBER
-          if ($LASTEXITCODE -ne 0) { throw "Fyne packaging failed" }
+          # The app window (Rune UI) is Spotseek.exe. The Go program is its backend: a
+          # console program that the window starts with a hidden console, so the
+          # tools it runs (sockseek, yt-dlp, ffmpeg) do not open windows.
           New-Item -ItemType Directory -Force -Path build/windows | Out-Null
-          Copy-Item Spotseek.exe build/windows/Spotseek.exe
+          go build -trimpath -o build/windows/spotseek-backend.exe .
+          if ($LASTEXITCODE -ne 0) { throw "Backend build failed" }
+          Copy-Item ui/target/release/spotseek.exe build/windows/Spotseek.exe
       - name: Build and test Windows installer
         if: runner.os == 'Windows'
         shell: pwsh
@@ -135,9 +152,10 @@ jobs:
           $target = Join-Path $env:RUNNER_TEMP "Spotseek smoke test"
           $install = Start-Process -FilePath $installer -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', "/DIR=`"$target`"") -PassThru -Wait
           if ($install.ExitCode -ne 0) { throw "Installer exited $($install.ExitCode)" }
-          python scripts/smoke-test.py "$target/bin" "$target/Spotseek.exe"
+          python scripts/smoke-test.py "$target/bin" "$target/Spotseek.exe" "$target/spotseek-backend.exe"
           if ($LASTEXITCODE -ne 0) { throw "Installed app smoke test failed" }
           if (!(Test-Path "$target/licenses/THIRD_PARTY_NOTICES.md")) { throw "Missing installed notices" }
+          if (!(Test-Path "$target/licenses/rust-crates.txt")) { throw "Missing Rust notices" }
           $uninstall = Start-Process -FilePath "$target/unins000.exe" -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -PassThru -Wait
           if ($uninstall.ExitCode -ne 0) { throw "Uninstaller exited $($uninstall.ExitCode)" }
           New-Item -ItemType Directory -Force -Path build/artifacts | Out-Null

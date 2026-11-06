@@ -1,0 +1,62 @@
+{"ev":"phase","phase":"spotify"}
+{"ev":"log","line":"Reading Spotify metadata..."}
+{"ev":"log","line":"Collection: Today’s Top Hits (3 tracks)"}
+{"ev":"collection","name":"Today’s Top Hits","kind":"playlist","tracks":[{"artist":"Ashe","title":"Stop The Wedding!","duration":198},{"artist":"Tame Impala","title":"Loser","duration":223},{"artist":"Tate McRae","title":"Housewife","duration":208}]}
+{"ev":"phase","phase":"soulseek"}
+{"ev":"log","line":"Downloading from Soulseek (mp3, prefer 320kbps)..."}
+{"ev":"log","line":"[cli] Starting CLI session in local mode"}
+{"ev":"log","line":"[soulseek] Logging in as choperrochopencio.."}
+{"ev":"log","line":"[001] ExtractJob: CSV: Input: /tmp/ev-test/out/.work/Today’s Top Hits.csv"}
+{"ev":"log","line":"[001] ExtractJob: CSV: Using columns: artist:\"Artist\", title:\"Song\", length:\"Duration\"."}
+{"ev":"log","line":"[002] Job List: running: Today’s Top Hits"}
+{"ev":"log","line":"[cli] Downloading 3 tracks:"}
+{"ev":"log","line":"  Ashe - Stop The Wedding! (198s)"}
+{"ev":"log","line":"  Tame Impala - Loser (223s)"}
+{"ev":"log","line":"  Tate McRae - Housewife (208s)"}
+{"ev":"track","i":0,"state":"searching"}
+{"ev":"log","line":"[003] SongJob: searching: Ashe - Stop The Wedding!"}
+{"ev":"track","i":1,"state":"searching"}
+{"ev":"log","line":"[004] SongJob: searching: Tame Impala - Loser"}
+{"ev":"track","i":2,"state":"searching"}
+{"ev":"log","line":"[005] SongJob: searching: Tate McRae - Housewife"}
+{"ev":"track","i":0,"state":"downloading","peer":"djcotter","source":"soulseek","total":8074006}
+{"ev":"log","line":"[003] SongJob: downloading: Ashe - Stop The Wedding!: djcotter\\Top40s\\010 - Ashe - Stop The Wedding!.mp3"}
+{"ev":"track","i":1,"state":"downloading","peer":"zwem","source":"soulseek","total":9185723}
+{"ev":"log","line":"[004] SongJob: downloading: Tame Impala - Loser: zwem\\..\\Tame Impala\\Deadbeat (2025)\\Tame Impala - Deadbeat - 04 - Loser.mp3"}
+{"ev":"bytes","i":0,"total":8074006}
+{"ev":"bytes","i":0,"bytes":13416,"total":8074006}
+{"ev":"bytes","i":1,"total":9185723}
+{"ev":"bytes","i":0,"bytes":354893,"total":8074006}
+{"ev":"bytes","i":0,"bytes":916293,"total":8074006}
+{"ev":"bytes","i":0,"bytes":1792622,"total":8074006}
+{"ev":"bytes","i":0,"bytes":3189822,"total":8074006}
+{"ev":"track","i":2,"state":"failed"}
+{"ev":"log","line":"[005] SongJob: failed [No search results]: Tate McRae - Housewife"}
+{"ev":"log","line":"    Error: No Soulseek file results found."}
+{"ev":"track","i":1,"state":"done","peer":"zwem","source":"soulseek","total":9185723}
+{"ev":"log","line":"[004] SongJob: succeeded: Tame Impala - Loser: zwem\\..\\Tame Impala\\Deadbeat (2025)\\Tame Impala - Deadbeat - 04 - Loser.mp3"}
+{"ev":"bytes","i":0,"bytes":5487222,"total":8074006}
+{"ev":"track","i":0,"state":"done","peer":"djcotter","source":"soulseek","total":8074006}
+{"ev":"log","line":"[003] SongJob: succeeded: Ashe - Stop The Wedding!: djcotter\\Top40s\\010 - Ashe - Stop The Wedding!.mp3"}
+{"ev":"log","line":"[002] Job List: partial: Today’s Top Hits"}
+{"ev":"log","line":"    Error: Some child jobs completed and some failed or were cancelled."}
+{"ev":"log"}
+{"ev":"log","line":"[cli] Completed: 2 succeeded, 1 failed."}
+{"ev":"log","line":"sockseek finished with: exit status 1"}
+{"ev":"log","line":"1 tracks missing from Soulseek"}
+{"ev":"log","line":"Trying YouTube Music for the missing tracks..."}
+{"ev":"phase","phase":"youtube"}
+{"ev":"log","line":"[1/1] Tate McRae - Housewife"}
+{"ev":"track","i":2,"state":"yt_search","source":"youtube"}
+{"ev":"log","line":"    downloading: Housewife (score 12)"}
+{"ev":"track","i":2,"state":"yt_download","peer":"YouTube Music","source":"youtube"}
+{"ev":"track","i":2,"state":"done","peer":"YouTube Music","source":"youtube"}
+{"ev":"phase","phase":"convert"}
+{"ev":"log","line":"Normalizing to mp3 320kbps..."}
+{"ev":"convert","count":3}
+{"ev":"convert","done":1,"count":3}
+{"ev":"convert","done":2,"count":3}
+{"ev":"convert","done":3,"count":3}
+{"ev":"log","line":"Done. 3 files in /tmp/ev-test/out"}
+{"ev":"phase","phase":"done"}
+{"ev":"result","name":"Today’s Top Hits","count":3,"files":3,"missing":1,"dir":"/tmp/ev-test/out"}

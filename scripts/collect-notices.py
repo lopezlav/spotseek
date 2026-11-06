@@ -45,6 +45,32 @@ while raw.strip():
             dest.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(item, dest / item.name)
 (out / 'go-modules.txt').write_text('\n'.join(modules) + '\n')
+# The Rune UI: its fonts and every Rust crate it is built from.
+fonts = out / 'fonts'
+fonts.mkdir(parents=True, exist_ok=True)
+for item in (root / 'ui/assets').glob('*-LICENSE.txt'):
+    shutil.copyfile(item, fonts / item.name)
+meta = json.loads(subprocess.check_output(
+    ['cargo', 'metadata', '--format-version', '1', '--locked', '--manifest-path', str(root / 'ui/Cargo.toml')],
+    text=True))
+members = set(meta['workspace_members'])
+crates = []
+for pkg in meta['packages']:
+    if pkg['id'] in members:
+        continue
+    label = f"{pkg['name']}@{pkg['version']}"
+    crates.append(f"{label} ({pkg.get('license') or 'see files'})")
+    # A crate in a git workspace (Rune) keeps its license at the workspace root.
+    folder = Path(pkg['manifest_path']).parent
+    for d in [folder, *list(folder.parents)[:3]]:
+        found = [i for i in d.iterdir() if i.is_file() and i.name.upper().startswith(('LICENSE', 'COPYING', 'NOTICE'))]
+        if found:
+            dest = out / 'rust' / label
+            dest.mkdir(parents=True, exist_ok=True)
+            for item in found:
+                shutil.copyfile(item, dest / item.name)
+            break
+(out / 'rust-crates.txt').write_text('\n'.join(sorted(crates)) + '\n')
 (out / 'SOURCES.txt').write_text('\n'.join([
     'Spotseek: https://github.com/lopezlav/spotseek (see the matching release tag)',
     f"Sockseek: https://github.com/fiso64/sockseek/tree/{v['sockseek']}",

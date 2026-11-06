@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/url"
 	"os"
@@ -556,6 +559,7 @@ func reorderFlags(args []string) []string {
 		"-o": true, "--o": true,
 		"-bitrate": true, "--bitrate": true,
 		"-limit": true, "--limit": true,
+		"-user": true, "--user": true,
 	}
 	var flags, positional []string
 	for i := 0; i < len(args); i++ {
@@ -581,6 +585,9 @@ func runCLI(args []string) {
 	measureTimings := fs.Bool("timings", false, "log elapsed time for each download stage")
 	limit := fs.Int("limit", 0, "only the first N tracks")
 	extractOnly := fs.Bool("extract-only", false, "only print the Spotify track list")
+	events := fs.Bool("events", false, "print JSON progress events, one per line; stop when stdin closes")
+	user := fs.String("user", "", "Soulseek username")
+	passStdin := fs.Bool("pass-stdin", false, "read the Soulseek password from the first stdin line")
 	_ = fs.Parse(reorderFlags(args))
 	input := fs.Arg(0)
 	if input == "" {
@@ -605,21 +612,66 @@ func runCLI(args []string) {
 		fmt.Fprintln(os.Stderr, "-o is required")
 		os.Exit(2)
 	}
-	res, err := pipeline.Run(context.Background(), &pipeline.Options{
+	opts := &pipeline.Options{
 		Input:          input,
 		OutputDir:      *out,
 		Bitrate:        *bitrate,
 		UseFallback:    !*noFallback,
 		MeasureTimings: *measureTimings,
 		Limit:          *limit,
+		SoulseekUser:   *user,
 		Log:            func(s string) { fmt.Println(s) },
-	})
+	}
+	if *events {
+		runEvents(opts, *passStdin)
+		return
+	}
+	res, err := pipeline.Run(context.Background(), opts)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 	_ = pipeline.WriteReport(res)
 	fmt.Printf("Done: %d files in %s\n", res.Files, res.OutputDir)
+}
+
+// runEvents runs the pipeline for a front end (the Rune UI): one JSON event
+// per line on stdout. The front end closes stdin to stop the run.
+func runEvents(opts *pipeline.Options, passStdin bool) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stdin := bufio.NewReader(os.Stdin)
+	if passStdin {
+		line, _ := stdin.ReadString('\n')
+		opts.SoulseekPass = strings.TrimRight(line, "\r\n")
+	}
+	// Cancelling the context also stops sockseek and yt-dlp.
+	go func() {
+		_, _ = io.Copy(io.Discard, stdin)
+		cancel()
+		// Spotify extraction does not watch the context. Do not keep
+		// running after the front end has gone.
+		time.Sleep(5 * time.Second)
+		os.Exit(1)
+	}()
+	var mu sync.Mutex
+	enc := json.NewEncoder(os.Stdout)
+	opts.Log = nil
+	opts.Event = func(e pipeline.Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		_ = enc.Encode(e)
+	}
+	res, err := pipeline.Run(ctx, opts)
+	if err != nil {
+		msg := err.Error()
+		if ctx.Err() != nil {
+			msg = "stopped"
+		}
+		opts.Event(pipeline.Event{Ev: "error", Message: msg})
+		os.Exit(1)
+	}
+	_ = pipeline.WriteReport(res)
 }
 
 // runServe starts the headless server that Mixxx talks to.

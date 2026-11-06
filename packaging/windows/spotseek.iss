@@ -2,7 +2,8 @@
 ; Build with ISCC (preinstalled on GitHub Actions windows-latest runners):
 ;   ISCC.exe /DAppVersion=1.2.3 packaging\windows\spotseek.iss
 ; Expected inputs, relative to the repository root:
-;   build\windows\Spotseek.exe  - the packaged app executable
+;   build\windows\Spotseek.exe          - the app window (Rune UI)
+;   build\windows\spotseek-backend.exe  - the Go backend that the window runs
 ;   build\bin\*                 - bundled tools (sockseek, yt-dlp, ffmpeg, ffprobe)
 ; Output: build\installer\Spotseek-Setup-<version>.exe
 
@@ -42,6 +43,7 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 
 [Files]
 Source: "{#SourceRoot}build\windows\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceRoot}build\windows\spotseek-backend.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceRoot}build\bin\*"; DestDir: "{app}\bin"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "*.pdb"
 Source: "{#SourceRoot}build\notices\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs
 

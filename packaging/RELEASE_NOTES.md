@@ -1,6 +1,9 @@
-Paste a public Spotify track, album, or playlist link, or search YouTube Music
-without signing in. Soulseek downloads use your own account; YouTube fallback
-and YouTube search do not require one.
+A new app window: paste a public Spotify track, album, or playlist link and
+watch it search, download, and turn into a poster of your tracks. Soulseek
+downloads use your own account; the YouTube fallback does not need one.
+
+The YouTube Music search and the My Spotify library are in **CLASSIC WINDOW**
+(bottom right of the app).
 
 ## Downloads
 
@@ -17,7 +20,7 @@ first launch attempt. If needed, remove the quarantine attribute from the app
 you downloaded: `xattr -dr com.apple.quarantine /Applications/Spotseek.app`.
 Windows may show SmartScreen: More info → Run anyway.
 
-The My Spotify tab is optional advanced setup requiring your own Spotify
+The My Spotify tab (in the classic window) is optional advanced setup requiring your own Spotify
 Developer Client ID. You do not need it for public links or YouTube search.
 
 Spotify page extraction and YouTube downloads depend on upstream services and
