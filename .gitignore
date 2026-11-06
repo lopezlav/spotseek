@@ -6,3 +6,4 @@ sockseek/
 Spotseek*.exe
 Spotseek*.zip
 __pycache__/
+ui/target/
