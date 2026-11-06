@@ -19,6 +19,12 @@ source links, and Go module notices in `licenses` (macOS: inside the app's
   Source: <https://github.com/denoland/deno>.
 - **Fyne and other Go dependencies**: their original notices are included under
   `licenses/go`; exact module versions are listed in `licenses/go-modules.txt`.
+- **Rune and other Rust dependencies** of the app window (`ui/`): Rune is MIT
+  (<https://github.com/anomalyco/rune>). Crate notices are included under
+  `licenses/rust`; exact crate versions and licenses are listed in
+  `licenses/rust-crates.txt`.
+- **Fonts** in the app window: Anton, Inter and IBM Plex Mono, all under the SIL
+  Open Font License 1.1. Their license texts are in `licenses/fonts`.
 
 `packaging/tools.json` records the versions, download URLs, and SHA-256 checksums
 used for each platform. Update it deliberately when refreshing the bundled tools.

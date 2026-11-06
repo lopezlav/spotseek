@@ -1,0 +1,7 @@
+{
+  "events": [
+    {"t": 1.2, "type": "paste", "text": "https://open.spotify.com/playlist/37i9dQZF1DX4sWnBi0yS4q"},
+    {"t": 3.6, "type": "key", "name": "Enter"},
+    {"t": 26.0, "type": "mark", "name": "end"}
+  ]
+}

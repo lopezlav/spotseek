@@ -8,7 +8,8 @@ import sys
 import tempfile
 
 bin_dir = Path(sys.argv[1]).resolve()
-app = Path(sys.argv[2]).resolve()
+app = Path(sys.argv[2]).resolve()          # the app window (Rune UI)
+backend = Path(sys.argv[3]).resolve()      # the Go backend it runs
 ext = '.exe' if sys.platform == 'win32' else ''
 env = os.environ.copy()
 system_path = str(Path(os.environ['SystemRoot']) / 'System32') if ext else '/usr/bin:/bin'
@@ -24,7 +25,9 @@ def run(args):
 for tool, flag in [('sockseek', '--help'), ('yt-dlp', '--version'), ('deno', '--version'),
                    ('ffmpeg', '-version'), ('ffprobe', '-version')]:
     run([bin_dir / (tool + ext), flag])
-run([app, '--cli', '--help'])
+run([backend, '--cli', '--help'])
+# The window app starts and knows its screens (no GPU or display needed for this).
+assert 'downloading' in run([app, '--list-scenes']).split()
 with tempfile.TemporaryDirectory() as tmp:
     mp3 = Path(tmp) / 'smoke.mp3'
     run([bin_dir / ('ffmpeg' + ext), '-v', 'error', '-f', 'lavfi', '-i',

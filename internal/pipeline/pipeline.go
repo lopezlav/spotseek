@@ -62,7 +62,10 @@ type Options struct {
 	MeasureTimings  bool
 	OnTiming        func(timing.Event)
 	Preparation     *PreparedTrack
-	logMu           sync.Mutex
+	// Event, if set, receives structured progress events (see events.go).
+	Event func(Event)
+	logMu sync.Mutex
+	track *tracker
 }
 
 // Result summarizes a finished run.
@@ -90,11 +93,33 @@ func allMissing(tracks []spotify.Track) []missingTrack {
 }
 
 func (o *Options) log(format string, a ...any) {
+	line := fmt.Sprintf(format, a...)
 	if o.Log != nil {
 		o.logMu.Lock()
-		defer o.logMu.Unlock()
-		o.Log(fmt.Sprintf(format, a...))
+		o.Log(line)
+		o.logMu.Unlock()
 	}
+	// JSON lines are for the Fyne window and the server; front ends that
+	// use events get the same facts as events.
+	if !strings.HasPrefix(line, "{") {
+		o.emit(Event{Ev: "log", Line: line})
+	}
+}
+
+// baseTitle removes the parts of a Spotify title that file names often leave
+// out: "(feat. X)", "[Remastered]", and " - Remix" style suffixes. It keeps the
+// full title when nothing would be left.
+func baseTitle(s string) string {
+	cut := len(s)
+	for _, sep := range []string{" (", " [", " - "} {
+		if i := strings.Index(s, sep); i > 0 && i < cut {
+			cut = i
+		}
+	}
+	if b := strings.TrimSpace(s[:cut]); b != "" {
+		return b
+	}
+	return s
 }
 
 // Run executes the full pipeline.
@@ -152,6 +177,7 @@ func Run(ctx context.Context, o *Options) (result *Result, runErr error) {
 	if o.Collection != nil {
 		coll = o.Collection
 	} else {
+		o.emit(Event{Ev: "phase", Phase: "spotify"})
 		o.log("Reading Spotify metadata...")
 		c, err := spotify.Extract(o.Input)
 		if err != nil {
@@ -169,6 +195,15 @@ func Run(ctx context.Context, o *Options) (result *Result, runErr error) {
 		return nil, fmt.Errorf("no tracks found")
 	}
 	o.log("Collection: %s (%d tracks)", coll.Name, len(tracks))
+	if o.Event != nil {
+		ce := Event{Ev: "collection", Name: coll.Name, Kind: coll.Kind, Artist: coll.Artist}
+		for _, t := range tracks {
+			ce.Tracks = append(ce.Tracks, TrackEvent{Artist: t.Artist, Title: t.Title, Duration: t.DurationSec})
+		}
+		o.emit(ce)
+		o.track = newTracker(o, tracks)
+		o.emit(Event{Ev: "phase", Phase: "soulseek"})
+	}
 
 	safe := ytdlp.SafeName(coll.Name)
 	if safe == "" {
@@ -272,10 +307,11 @@ func Run(ctx context.Context, o *Options) (result *Result, runErr error) {
 				names += normTitle(filepath.Base(f)) + "|"
 			}
 			for _, t := range tracks {
-				if !strings.Contains(names, normTitle(t.Title)) {
+				if !strings.Contains(names, normTitle(baseTitle(t.Title))) {
 					missing = append(missing, missingTrack{Artist: t.Artist, Title: t.Title, Duration: t.DurationSec})
 				}
 			}
+			o.markAlbum(missing)
 			if len(missing) > 0 {
 				o.log("%d tracks are not in the album folder", len(missing))
 				if o.UseFallback {
@@ -322,8 +358,14 @@ func Run(ctx context.Context, o *Options) (result *Result, runErr error) {
 	if prepared != nil {
 		prepared.stop()
 	}
+	if !o.UseFallback {
+		for _, m := range missing {
+			o.trackState(m, StateMissing, Event{})
+		}
+	}
 
 	// 4. Normalize and merge
+	o.emit(Event{Ev: "phase", Phase: "convert"})
 	o.log("Normalizing to mp3 %skbps...", o.Bitrate)
 	end := timing.Begin(ctx, "normalize.total", "")
 	files, err := normalizeAll(ctx, o, []string{ssOut, ytOut}, o.OutputDir)
@@ -340,6 +382,8 @@ func Run(ctx context.Context, o *Options) (result *Result, runErr error) {
 		OutputDir:  o.OutputDir,
 	}
 	o.log("Done. %d files in %s", files, o.OutputDir)
+	o.emit(Event{Ev: "phase", Phase: "done"})
+	o.emit(Event{Ev: "result", Files: files, Count: len(tracks), Missing: len(missing), Dir: o.OutputDir, Name: coll.Name})
 	return res, nil
 }
 
@@ -382,6 +426,9 @@ func runStream(ctx context.Context, o *Options, args ...string) (retErr error) {
 	for scan.Scan() {
 		line := scan.Text()
 		progress.line(line)
+		if o.track != nil {
+			o.track.handle(line)
+		}
 		o.log("%s", line)
 		if o.AbortSockseekOn != nil && o.AbortSockseekOn(line) {
 			_ = cmd.Process.Kill()
@@ -412,7 +459,7 @@ func sockseekBaseArgs(o *Options) []string {
 }
 
 func sockseekProgressArgs(o *Options) []string {
-	if o.ProgressJSON || o.MeasureTimings || o.OnTiming != nil {
+	if o.ProgressJSON || o.MeasureTimings || o.OnTiming != nil || o.Event != nil {
 		return []string{"--progress-json"}
 	}
 	return nil
@@ -495,6 +542,7 @@ func readMissing(indexPath string, tracks []spotify.Track) []missingTrack {
 func fallback(ctx context.Context, o *Options, missing []missingTrack, ytOut string, prepared *fallbackSearch) {
 	if len(missing) > 0 {
 		o.log(`{"type":"source","data":{"source":"youtube"}}`)
+		o.emit(Event{Ev: "phase", Phase: "youtube"})
 	}
 	finish := timing.Begin(ctx, "youtube.fallback_total", "")
 	defer func() { finish(ctx.Err()) }()
@@ -503,6 +551,7 @@ func fallback(ctx context.Context, o *Options, missing []missingTrack, ytOut str
 			return
 		}
 		o.log("[%d/%d] %s - %s", i+1, len(missing), m.Artist, m.Title)
+		o.trackState(m, StateYTSearch, Event{Source: "youtube"})
 		var cands []ytdlp.Candidate
 		var err error
 		if prepared != nil && prepared.track == m {
@@ -520,11 +569,13 @@ func fallback(ctx context.Context, o *Options, missing []missingTrack, ytOut str
 				o.log("    search failed: %v", err)
 			}
 			o.log("    no candidates")
+			o.trackState(m, StateMissing, Event{})
 			continue
 		}
 		best := cands[0]
 		if best.Score < o.MinScore {
 			o.log("    best score %.0f < %.0f, skipping", best.Score, o.MinScore)
+			o.trackState(m, StateMissing, Event{})
 			continue
 		}
 		name := ytdlp.SafeName(m.Artist + " - " + m.Title)
@@ -533,9 +584,13 @@ func fallback(ctx context.Context, o *Options, missing []missingTrack, ytOut str
 		}
 		o.log("    downloading: %s (score %.0f)", best.Title, best.Score)
 		o.log(`{"type":"download_start","data":{}}`)
+		o.trackState(m, StateYTDownload, Event{Source: "youtube", Peer: "YouTube Music"})
 		if err := ytdlp.Download(ctx, best, ytOut, name, o.Bitrate+"K"); err != nil {
 			o.log("    download failed: %v", err)
+			o.trackState(m, StateMissing, Event{})
+			continue
 		}
+		o.trackState(m, StateDone, Event{Source: "youtube", Peer: "YouTube Music"})
 	}
 }
 
@@ -601,6 +656,12 @@ func normalizeAll(ctx context.Context, o *Options, sources []string, destDir str
 	}
 	target, _ := strconv.Atoi(o.Bitrate)
 	count := 0
+	total, seen := 0, 0
+	if o.Event != nil {
+		for _, srcDir := range sources {
+			total += len(walkAudio(srcDir))
+		}
+	}
 	for _, srcDir := range sources {
 		end := timing.Begin(ctx, "normalize.scan", filepath.Base(srcDir))
 		audio := walkAudio(srcDir)
@@ -609,6 +670,8 @@ func normalizeAll(ctx context.Context, o *Options, sources []string, destDir str
 			if ctx.Err() != nil {
 				return count, ctx.Err()
 			}
+			o.emit(Event{Ev: "convert", Done: seen, Count: total})
+			seen++
 			base := ytdlp.SafeName(strings.TrimSuffix(filepath.Base(src), filepath.Ext(src)))
 			if base == "" {
 				base = "track"
@@ -643,7 +706,42 @@ func normalizeAll(ctx context.Context, o *Options, sources []string, destDir str
 			count++
 		}
 	}
+	o.emit(Event{Ev: "convert", Done: total, Count: total})
 	return count, nil
+}
+
+// markAlbum marks the tracks found in an album folder as done, and the rest as failed.
+func (o *Options) markAlbum(missing []missingTrack) {
+	if o.track == nil {
+		return
+	}
+	miss := map[int]bool{}
+	o.track.mu.Lock()
+	defer o.track.mu.Unlock()
+	for _, m := range missing {
+		if i := o.track.find(m.Artist, m.Title); i >= 0 {
+			miss[i] = true
+		}
+	}
+	for i := range o.track.tracks {
+		if miss[i] {
+			o.track.set(i, StateFailed, Event{})
+		} else if o.track.state[i] != StateDone {
+			o.track.set(i, StateDone, Event{Source: "soulseek"})
+		}
+	}
+}
+
+// trackState sends a track event for a track that is known by artist and title.
+func (o *Options) trackState(m missingTrack, state string, e Event) {
+	if o.track == nil {
+		return
+	}
+	o.track.mu.Lock()
+	defer o.track.mu.Unlock()
+	if i := o.track.find(m.Artist, m.Title); i >= 0 {
+		o.track.set(i, state, e)
+	}
 }
 
 func copyFile(src, dst string) error {
