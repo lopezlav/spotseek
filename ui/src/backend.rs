@@ -60,6 +60,8 @@ pub struct Request {
 pub struct Run {
     child: Arc<Mutex<Child>>,
     stdin: Option<std::process::ChildStdin>,
+    #[cfg(windows)]
+    job: Option<Arc<job::Job>>,
 }
 
 /// The backend binary: `SPOTSEEK_BACKEND`, else `spotseek-backend` next to this program.
@@ -124,6 +126,11 @@ impl Run {
                 let _ = writeln!(s, "{}", req.pass);
             }
         }
+        // On Windows, killing a process does not kill what it started (yt-dlp runs as a
+        // parent and a worker). A job object holds the whole tree, so Stop can end it,
+        // and Windows ends it when this app exits.
+        #[cfg(windows)]
+        let job = job::Job::holding(&child).map(Arc::new);
         let stdout = child.stdout.take().ok_or("no stdout")?;
         let stderr = child.stderr.take();
         let child = Arc::new(Mutex::new(child));
@@ -142,7 +149,12 @@ impl Run {
                 }
             });
         }
+        #[cfg(windows)]
+        let reader_job = job.clone();
         std::thread::spawn(move || {
+            // Keep the job open until the backend has exited.
+            #[cfg(windows)]
+            let _job = reader_job;
             let mut ended = false;
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 if let Some(e) = parse(&line) {
@@ -165,21 +177,90 @@ impl Run {
             };
             on_exit(msg);
         });
-        Ok(Run { child, stdin })
+        Ok(Run {
+            child,
+            stdin,
+            #[cfg(windows)]
+            job,
+        })
     }
 
     /// Asks the backend to stop (closes its stdin), and kills it if it is still running after
-    /// a few seconds.
+    /// a few seconds. On Windows this also ends every program it started.
     pub fn stop(&mut self) {
         self.stdin.take();
         let child = self.child.clone();
+        #[cfg(windows)]
+        let job = self.job.clone();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(4));
             let mut c = child.lock().unwrap();
             if let Ok(None) = c.try_wait() {
                 let _ = c.kill();
             }
+            #[cfg(windows)]
+            if let Some(job) = job {
+                job.terminate();
+            }
         });
+    }
+}
+
+#[cfg(windows)]
+mod job {
+    use std::os::windows::io::AsRawHandle;
+    use std::process::Child;
+
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
+    };
+
+    /// A job object that holds a process and everything it starts. Closing the last handle
+    /// (also when this app exits) ends them all.
+    pub struct Job(HANDLE);
+
+    // The handle is only used through thread-safe Win32 calls.
+    unsafe impl Send for Job {}
+    unsafe impl Sync for Job {}
+
+    impl Job {
+        pub fn holding(child: &Child) -> Option<Job> {
+            unsafe {
+                let h = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+                if h.is_null() {
+                    return None;
+                }
+                let job = Job(h);
+                let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                let ok = SetInformationJobObject(
+                    h,
+                    JobObjectExtendedLimitInformation,
+                    &info as *const _ as *const core::ffi::c_void,
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                );
+                if ok == 0 || AssignProcessToJobObject(h, child.as_raw_handle() as HANDLE) == 0 {
+                    return None;
+                }
+                Some(job)
+            }
+        }
+
+        pub fn terminate(&self) {
+            unsafe {
+                TerminateJobObject(self.0, 1);
+            }
+        }
+    }
+
+    impl Drop for Job {
+        fn drop(&mut self) {
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
     }
 }
 
