@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def main():
     manifest = json.loads((ROOT / 'packaging/tools.json').read_text())
     if len(sys.argv) != 3 or sys.argv[2] not in manifest['platforms']:
-        sys.exit('usage: fetch-tools.py <output-dir> <darwin-arm64|darwin-x64|win-x64>')
+        sys.exit('usage: fetch-tools.py <output-dir> <darwin-arm64|darwin-x64|win-x64|linux-x64>')
     out = Path(sys.argv[1])
     out.mkdir(parents=True, exist_ok=True)
     for asset in manifest['platforms'][sys.argv[2]]:

@@ -50,6 +50,9 @@ type Event struct {
 	Missing int    `json:"missing,omitempty"`
 	Dir     string `json:"dir,omitempty"`
 
+	// result: the run was stopped early (Options.Stop).
+	Stopped bool `json:"stopped,omitempty"`
+
 	// log and error
 	Line    string `json:"line,omitempty"`
 	Message string `json:"message,omitempty"`

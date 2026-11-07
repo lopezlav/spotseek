@@ -1,6 +1,6 @@
 [package]
 name = "spotseek-ui"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -40,3 +40,7 @@ codegen-units = 16
 [profile.dev.package."*"]
 opt-level = 2
 debug = false
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The desktop's secret service (GNOME Keyring, KWallet) keeps the Soulseek password.
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }

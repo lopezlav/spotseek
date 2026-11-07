@@ -663,10 +663,16 @@ func runEvents(opts *pipeline.Options, passStdin, ask bool, coverOut string) {
 	// Later stdin lines are answers (--ask). End of input stops the run;
 	// cancelling the context also stops sockseek and yt-dlp.
 	answers := make(chan string, 4)
+	// {"stop":true}: stop downloading, but convert and keep what is finished.
+	stop := make(chan struct{})
+	var stopOnce sync.Once
+	opts.Stop = stop
 	go func() {
 		for {
 			line, err := stdin.ReadString('\n')
-			if strings.TrimSpace(line) != "" {
+			if strings.Contains(line, `"stop"`) {
+				stopOnce.Do(func() { close(stop) })
+			} else if strings.TrimSpace(line) != "" {
 				select {
 				case answers <- line:
 				default:

@@ -40,6 +40,22 @@ install the tools with Homebrew and build from source (see below).
 Windows may show a blue SmartScreen warning because the app is not signed.
 Choose **More info**, then **Run anyway**.
 
+### Linux (x64)
+
+1. Download `Spotseek-linux-x64.tar.gz` from the latest release.
+2. Unpack it and run the install script:
+   ```bash
+   tar -xzf Spotseek-linux-x64.tar.gz
+   ./Spotseek/install.sh
+   ```
+   This puts Spotseek in your app menu and adds a `spotseek` command
+   (`~/.local/share/spotseek`). Or run `./Spotseek/spotseek` without installing.
+   `~/.local/share/spotseek/install.sh --uninstall` removes it.
+
+All tools are included. The system needs what a desktop normally has: a
+graphics driver (Vulkan or OpenGL), ALSA, D-Bus with a secret service (GNOME
+Keyring or KWallet) for the Soulseek password, and ICU. Built on Ubuntu 22.04.
+
 ## Soulseek account
 
 Downloads try Soulseek first, through the bundled sockseek tool. Soulseek
@@ -168,6 +184,7 @@ GitHub Actions builds the downloads whenever a tag like `v1.2.3` is pushed:
 
 - `Spotseek-macOS-arm64.zip` - the .app with all tools bundled.
 - `Spotseek-Setup-<version>.exe` - the Windows installer with all tools bundled.
+- `Spotseek-linux-x64.tar.gz` - the Linux app with all tools bundled and an install script.
 
 Both contain the app window (the Rune UI, `Spotseek.app/Contents/MacOS/spotseek`
 or `Spotseek.exe`) and the Go backend next to it (`spotseek-backend`).

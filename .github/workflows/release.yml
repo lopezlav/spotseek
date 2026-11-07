@@ -62,6 +62,12 @@ jobs:
             platform: win-x64
             rid: win-x64
             artifact: Spotseek-Setup-windows
+          # The oldest supported Ubuntu, so the build runs on older systems too (glibc 2.35).
+          - name: Linux (x64)
+            runner: ubuntu-22.04
+            platform: linux-x64
+            rid: linux-x64
+            artifact: Spotseek-linux-x64
     env:
       APP_VERSION: ${{ needs.prepare.outputs.version }}
     steps:
@@ -72,6 +78,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      - name: Install Linux build libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          # Audio (player), D-Bus (password store, file dialog), Wayland and X11 (window),
+          # OpenGL and X11 headers (the classic Fyne window in the backend).
+          sudo apt-get install -y --no-install-recommends libasound2-dev libdbus-1-dev pkg-config \
+            libwayland-dev libxkbcommon-dev libgl1-mesa-dev xorg-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -88,6 +102,7 @@ jobs:
           cargo test --release --locked
           cargo build --release --locked
       - name: Install fyne CLI
+        if: runner.os == 'macOS'
         run: go install fyne.io/fyne/v2/cmd/fyne@v2.8.1
       - name: Download verified bundled tools
         run: python scripts/fetch-tools.py build/bin ${{ matrix.platform }}
@@ -160,6 +175,35 @@ jobs:
           if ($uninstall.ExitCode -ne 0) { throw "Uninstaller exited $($uninstall.ExitCode)" }
           New-Item -ItemType Directory -Force -Path build/artifacts | Out-Null
           Copy-Item $installer build/artifacts/
+      - name: Package and test Linux app
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          # A folder with the app window, the backend, the tools and an install script.
+          app=build/linux/Spotseek
+          mkdir -p "$app"
+          go build -trimpath -o "$app/spotseek-backend" .
+          cp ui/target/release/spotseek "$app/spotseek"
+          cp -R build/bin "$app/bin"
+          cp -R build/notices "$app/licenses"
+          cp Icon.png "$app/spotseek.png"
+          cp packaging/linux/install.sh packaging/linux/README.txt "$app/"
+          chmod +x "$app/spotseek" "$app/spotseek-backend" "$app"/bin/* "$app/install.sh"
+          mkdir -p build/artifacts
+          tar -C build/linux -czf build/artifacts/Spotseek-linux-x64.tar.gz Spotseek
+          # Test what a user gets: unpack, install for a test user, run the smoke test there.
+          export HOME="$RUNNER_TEMP/home" XDG_DATA_HOME=
+          mkdir -p "$HOME"
+          tar -C "$RUNNER_TEMP" -xzf build/artifacts/Spotseek-linux-x64.tar.gz
+          "$RUNNER_TEMP/Spotseek/install.sh"
+          installed="$HOME/.local/share/spotseek"
+          test -L "$HOME/.local/bin/spotseek"
+          grep -q "Exec=\"$installed/spotseek\"" "$HOME/.local/share/applications/spotseek.desktop"
+          python scripts/smoke-test.py "$installed/bin" "$installed/spotseek" "$installed/spotseek-backend"
+          test -f "$installed/licenses/THIRD_PARTY_NOTICES.md"
+          test -f "$installed/licenses/rust-crates.txt"
+          "$installed/install.sh" --uninstall
+          test ! -e "$installed"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
