@@ -725,13 +725,16 @@ func normalizeAll(ctx context.Context, o *Options, sources []string, destDir str
 			total += len(walkAudio(srcDir))
 		}
 	}
-	used := map[int]bool{}
-	placed := func(src, dest string) {
-		if o.track == nil {
-			return
+	var assigned map[string]int
+	if o.track != nil {
+		var all []string
+		for _, srcDir := range sources {
+			all = append(all, walkAudio(srcDir)...)
 		}
-		if i := o.track.fileIndex(src, used); i >= 0 {
-			used[i] = true
+		assigned = o.track.assignFiles(all)
+	}
+	placed := func(src, dest string) {
+		if i, ok := assigned[src]; ok {
 			o.emit(Event{Ev: "file", I: intp(i), Path: dest})
 		}
 	}
@@ -810,10 +813,8 @@ func albumMissing(o *Options, tracks []spotify.Track, files []string) []missingT
 	var missing []missingTrack
 	if o.track != nil {
 		used := map[int]bool{}
-		for _, f := range files {
-			if i := o.track.fileIndex(f, used); i >= 0 {
-				used[i] = true
-			}
+		for _, i := range o.track.assignFiles(files) {
+			used[i] = true
 		}
 		for _, t := range tracks {
 			if i := o.track.findLocked(t.Artist, t.Title); i < 0 || !used[i] {

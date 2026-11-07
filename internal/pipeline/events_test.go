@@ -37,26 +37,46 @@ func TestTrackStateWaitsForTheTerminalOutcome(t *testing.T) {
 	}
 }
 
-func TestFileIndexMatchesPathsAndNames(t *testing.T) {
+func TestAssignFilesUsesTheBestMatches(t *testing.T) {
 	tr, _ := newTestTracker(
 		spotify.Track{Artist: "Michael Jackson", Title: "Thriller"},
+		spotify.Track{Artist: "Michael Jackson", Title: "P.Y.T. (Pretty Young Thing)"},
+		spotify.Track{Artist: "Michael Jackson", Title: "P.Y.T. (Pretty Young Thing) (2008 with will.i.am) (with will.i.am) - Thriller 25th Anniversary Remix"},
+		spotify.Track{Artist: "Michael Jackson", Title: "Billie Jean"},
+		spotify.Track{Artist: "Michael Jackson", Title: "Billie Jean - Underground Mix"},
 		spotify.Track{Artist: "Michael Jackson", Title: "Thriller - Instrumental"},
-		spotify.Track{Artist: "Michael Jackson", Title: "Beat It - Single Version"},
 		spotify.Track{Artist: "Enya", Title: "Only Time"},
 	)
-	tr.src[3] = "/w/soulseek/x/whatever.mp3"
-	used := map[int]bool{}
-	cases := map[string]int{
-		"/w/soulseek/x/whatever.mp3":                         3,
-		"/w/soulseek/album/28 - Thriller - Instrumental.mp3": 1,
-		"/w/soulseek/album/04 - Thriller.mp3":                0,
-		"/w/soulseek/album/05 - Beat It.mp3":                 2,
-		"/w/youtube/Nobody - Nothing.mp3":                    -1,
+	tr.src[6] = "/w/x/whatever.mp3"
+	// The real folder from the Thriller 25 run, in its own order.
+	dir := "/w/soulseek/Thriller 25/"
+	got := tr.assignFiles([]string{
+		dir + "04 - Thriller.mp3",
+		dir + "06 - Billie Jean.mp3",
+		dir + "08 - P.Y.T. (Pretty Young Thing).mp3",
+		dir + "12 - P.Y.T. (Pretty Young Thing) 2008 with will.i.am (Thriller 25th Anniversary Remix feat. willi.i.am).mp3",
+		dir + "20 - Billie Jean (Home Demo from 1981).mp3",
+		dir + "29 - Billie Jean (Underground Mix).mp3",
+		dir + "30 - P.Y.T. (Pretty Young Thing) (2008 with will.i.am) (with will.i.am) - Thriller 25th Anniversary Remix.mp3",
+		dir + "30 - Thriller (Instrumental).mp3",
+		"/w/x/whatever.mp3",
+	})
+	want := map[string]int{
+		dir + "04 - Thriller.mp3":                      0,
+		dir + "06 - Billie Jean.mp3":                   3,
+		dir + "08 - P.Y.T. (Pretty Young Thing).mp3":   1,
+		dir + "29 - Billie Jean (Underground Mix).mp3": 4,
+		dir + "30 - P.Y.T. (Pretty Young Thing) (2008 with will.i.am) (with will.i.am) - Thriller 25th Anniversary Remix.mp3": 2,
+		dir + "30 - Thriller (Instrumental).mp3": 5,
+		"/w/x/whatever.mp3":                      6,
 	}
-	for path, want := range cases {
-		if got := tr.fileIndex(path, used); got != want {
-			t.Errorf("%s: got %d, want %d", path, got, want)
+	for f, i := range want {
+		if g, ok := got[f]; !ok || g != i {
+			t.Errorf("%s: got %d (%v), want %d", f, g, ok, i)
 		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("extra files were given a track: %v", got)
 	}
 }
 

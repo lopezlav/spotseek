@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 
@@ -316,42 +317,59 @@ func (t *tracker) handle(line string) bool {
 
 var leadingNumber = regexp.MustCompile(`^[0-9]{1,3}\s*[-._)]?\s*`)
 
-// fileIndex returns the track that a downloaded file belongs to, or -1. It
-// uses the path Sockseek reported, then the file name: "Artist - Title"
-// (YouTube, per-track Soulseek) or "07 - Title" (album folders).
-func (t *tracker) fileIndex(src string, used map[int]bool) int {
+// assignFiles gives each downloaded file the track it belongs to (path ->
+// track index). Files that fit no track (bonus tracks, extra mixes) are left
+// out. It scores every file against every track and assigns the best pairs
+// first, so a weak match ("Thriller" inside the name of a remix) cannot take a
+// track that another file matches fully ("30 - Thriller (Instrumental)").
+func (t *tracker) assignFiles(files []string) map[string]int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	clean := filepath.Clean(src)
-	for i, p := range t.src {
-		if p != "" && p == clean && !used[i] {
-			return i
-		}
+	type pair struct {
+		file  string
+		i     int
+		score int
 	}
-	name := strings.TrimSuffix(filepath.Base(src), filepath.Ext(src))
-	name = leadingNumber.ReplaceAllString(name, "")
-	nn := normTitle(name)
-	best, bestLen := -1, 0
-	for i, tr := range t.tracks {
-		if used[i] {
-			continue
-		}
-		for _, title := range []string{tr.Title, baseTitle(tr.Title)} {
-			nt := normTitle(title)
-			if nt == "" || !strings.Contains(nn, nt) {
+	var pairs []pair
+	for _, f := range files {
+		clean := filepath.Clean(f)
+		name := strings.TrimSuffix(filepath.Base(f), filepath.Ext(f))
+		stem := normTitle(leadingNumber.ReplaceAllString(name, ""))
+		for i, tr := range t.tracks {
+			score := 0
+			full, base := normTitle(tr.Title), normTitle(baseTitle(tr.Title))
+			switch {
+			case t.src[i] != "" && t.src[i] == clean:
+				score = 1_000_000 // the path Sockseek reported
+			case full != "" && stem == full:
+				score = 100_000 + len(full)
+			case full != "" && strings.Contains(stem, full):
+				score = 10_000 + len(full)
+			case base != "" && stem == base:
+				score = 5_000 + len(base)
+			case base != "" && strings.Contains(stem, base):
+				score = len(base)
+			}
+			if score == 0 {
 				continue
 			}
-			// The longest matching title wins ("Thriller" vs "Thriller - Instrumental").
-			score := len(nt)
-			if na := normTitle(tr.Artist); na != "" && strings.Contains(nn, na) {
-				score += 1000
+			if na := normTitle(tr.Artist); na != "" && strings.Contains(stem, na) {
+				score += 500
 			}
-			if score > bestLen {
-				best, bestLen = i, score
-			}
+			pairs = append(pairs, pair{f, i, score})
 		}
 	}
-	return best
+	sort.SliceStable(pairs, func(a, b int) bool { return pairs[a].score > pairs[b].score })
+	out := map[string]int{}
+	taken := map[int]bool{}
+	for _, p := range pairs {
+		if _, done := out[p.file]; done || taken[p.i] {
+			continue
+		}
+		out[p.file] = p.i
+		taken[p.i] = true
+	}
+	return out
 }
 
 // findLocked is find for callers that do not hold the lock.
