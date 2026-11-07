@@ -51,13 +51,21 @@ pub fn field(lines: &[&str]) -> Field {
         })
         .collect();
     let text_w = widths.iter().cloned().fold(0.0, f32::max).ceil() as usize;
+    // Room above the caps for accents (Á, É, Ó) on the first line.
+    let above = lines.first().map_or(0.0, |l| {
+        l.chars()
+            .filter_map(|c| font.outline_glyph(sf.glyph_id(c).with_scale_and_position(PX, point(0.0, 0.0))))
+            .map(|o| -o.px_bounds().min.y - cap)
+            .fold(0.0f32, f32::max)
+    });
+    let top = PAD as f32 + above.ceil();
     let text_h = (cap + line_h * (lines.len() as f32 - 1.0)).ceil() as usize;
     let w = text_w + PAD * 2;
-    let h = text_h + PAD * 2;
+    let h = text_h + PAD * 2 + above.ceil() as usize;
 
     let mut cov = vec![0f32; w * h];
     for (li, l) in lines.iter().enumerate() {
-        let baseline = PAD as f32 + cap + line_h * li as f32;
+        let baseline = top + cap + line_h * li as f32;
         let mut x = PAD as f32;
         let mut prev = None;
         for c in l.chars() {

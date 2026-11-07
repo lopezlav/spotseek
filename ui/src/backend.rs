@@ -62,6 +62,8 @@ pub struct Request {
     pub pass: String,
     /// Wait after the collection event for [`Run::answer`]: which tracks to download.
     pub ask: bool,
+    /// No Soulseek account: YouTube Music only.
+    pub skip_soulseek: bool,
     /// Where the backend saves the cover image, or empty.
     pub cover_out: String,
     /// Every line the backend writes (stdout and stderr) is copied here.
@@ -124,6 +126,9 @@ impl Run {
         }
         if req.ask {
             cmd.arg("--ask");
+        }
+        if req.skip_soulseek {
+            cmd.arg("--skip-soulseek");
         }
         if !req.cover_out.is_empty() {
             cmd.arg("--cover-out").arg(&req.cover_out);

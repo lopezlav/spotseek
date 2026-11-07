@@ -6,9 +6,11 @@
 // A window app on Windows: no console window behind it.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod account;
 mod backend;
 mod gfx;
 mod history;
+mod i18n;
 mod media;
 mod model;
 mod sdf;
@@ -48,6 +50,9 @@ fn poll(s: &mut State, now: f64, tx: &mut Tx) -> bool {
 fn on_key(s: &mut State, ev: &KeyEvent, _: &mut Tx) -> bool {
     match &ev.key {
         Key::Escape if s.settings_open => s.close_settings(),
+        Key::Escape if s.login_open => s.login_open = false,
+        Key::Enter if s.settings_open => s.close_settings(),
+        Key::Enter if s.login_open => s.sign_in(),
         Key::Escape if s.open.is_some() => s.open = None,
         Key::Text(t) if t == " " && s.open.is_some() && !(s.phase == Phase::Idle && s.link.focused) => {
             if let Some(d) = s.open.clone().and_then(|k| s.detail_of(&k)) {
@@ -56,7 +61,7 @@ fn on_key(s: &mut State, ev: &KeyEvent, _: &mut Tx) -> bool {
                 }
             }
         }
-        Key::Enter if s.phase == Phase::Idle && !s.settings_open => s.start(),
+        Key::Enter if s.phase == Phase::Idle && !s.settings_open && !s.login_open => s.start(),
         Key::Command(',') => s.settings_open = true,
         _ => return false,
     }
@@ -241,6 +246,25 @@ fn scene_history_screen(s: &mut State) {
     s.show_history = true;
 }
 
+/// The Soulseek sign-in window of the first launch.
+fn scene_login(s: &mut State) {
+    s.account = account::Account::None;
+    s.login_open = true;
+    s.login_user.replace_text("dj_nico");
+    s.login_error = s.lang.t("That name is taken, or the password is wrong.", "Ese nombre ya existe o la contraseña es incorrecta.").into();
+}
+
+/// The settings with no account: the dot, and the form.
+fn scene_settings_signed_out(s: &mut State) {
+    s.account = account::Account::None;
+    s.settings_open = true;
+}
+
+/// The paste screen with no account: the note and the dot.
+fn scene_idle_signed_out(s: &mut State) {
+    s.account = account::Account::None;
+}
+
 fn scene_failed(s: &mut State) {
     demo(s);
     s.phase = Phase::Failed;
@@ -267,6 +291,9 @@ fn main() {
             ("have-all", scene_have_all),
             ("history", scene_history),
             ("history-screen", scene_history_screen),
+            ("login", scene_login),
+            ("settings-signed-out", scene_settings_signed_out),
+            ("idle-signed-out", scene_idle_signed_out),
             ("settings", scene_settings),
         ],
         fonts: FONTS,
@@ -277,7 +304,11 @@ fn main() {
     };
     let app = App::new(spec);
     let handle = app.handle();
-    app.init(move || State::new(Some(handle)))
+    app.init(move || {
+        let mut s = State::new(Some(handle));
+        s.ask_login_at_launch();
+        s
+    })
         .on_close(|s: &mut State, _| {
             if let Some(mut r) = s.run.take() {
                 r.stop();

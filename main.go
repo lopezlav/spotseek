@@ -30,6 +30,7 @@ import (
 
 	"spotseek-app/internal/pipeline"
 	"spotseek-app/internal/server"
+	"spotseek-app/internal/slsk"
 	"spotseek-app/internal/spotify"
 )
 
@@ -595,7 +596,13 @@ func runCLI(args []string) {
 	passStdin := fs.Bool("pass-stdin", false, "read the Soulseek password from the first stdin line")
 	ask := fs.Bool("ask", false, `with --events: after the collection event, read {"only":[indexes]} (or {}) from stdin`)
 	coverOut := fs.String("cover-out", "", "with --events: save the collection cover image to this file")
+	skipSoulseek := fs.Bool("skip-soulseek", false, "do not use Soulseek (no account): YouTube Music only")
+	checkLogin := fs.Bool("check-login", false, "sign in to Soulseek with --user and the stdin password, print {\"ok\":…} and exit (a new name creates the account)")
 	_ = fs.Parse(reorderFlags(fs, args))
+	if *checkLogin {
+		runCheckLogin(*user)
+		return
+	}
 	input := fs.Arg(0)
 	if input == "" {
 		fmt.Fprintln(os.Stderr, "usage: spotseek-app --cli <spotify-url> -o <dir>")
@@ -627,6 +634,7 @@ func runCLI(args []string) {
 		MeasureTimings: *measureTimings,
 		Limit:          *limit,
 		SoulseekUser:   *user,
+		SkipSoulseek:   *skipSoulseek,
 		Log:            func(s string) { fmt.Println(s) },
 	}
 	if *events {
@@ -724,6 +732,25 @@ func runEvents(opts *pipeline.Options, passStdin, ask bool, coverOut string) {
 		os.Exit(1)
 	}
 	_ = pipeline.WriteReport(res)
+}
+
+// runCheckLogin signs in to Soulseek once, for the app's account screen. The
+// password is the first stdin line. It prints one JSON line:
+// {"ok":true} or {"ok":false,"reason":"INVALIDPASS","message":"..."}.
+func runCheckLogin(user string) {
+	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	pass := strings.TrimRight(line, "\r\n")
+	out := map[string]any{}
+	res, err := slsk.Login(context.Background(), slsk.Server, user, pass)
+	switch {
+	case err != nil:
+		out["ok"], out["reason"], out["message"] = false, "ERROR", err.Error()
+	case res.OK:
+		out["ok"] = true
+	default:
+		out["ok"], out["reason"], out["message"] = false, res.Reason, res.Detail
+	}
+	_ = json.NewEncoder(os.Stdout).Encode(out)
 }
 
 // download saves url to path (through a temporary file).
