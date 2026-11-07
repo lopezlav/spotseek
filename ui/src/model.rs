@@ -258,6 +258,12 @@ pub struct State {
     pub scrub: Option<(String, f32)>,
     /// The history screen, opened from the paste screen.
     pub show_history: bool,
+    /// STOP was pressed: the backend converts the finished tracks, then the poster shows.
+    pub stopping: bool,
+    /// The app clock at the last download progress (a track event or bytes).
+    pub last_progress: f64,
+    /// The last run was stopped early: tracks it did not get are "not downloaded", not missing.
+    pub stopped_early: bool,
     pub media: Media,
 }
 
@@ -319,6 +325,9 @@ impl State {
             focused: true,
             scrub: None,
             show_history: false,
+            stopping: false,
+            last_progress: 0.0,
+            stopped_early: false,
             media,
         }
     }
@@ -426,7 +435,33 @@ impl State {
         }
     }
 
+    /// STOP: the downloads end, and the finished tracks are still converted and kept. A second
+    /// STOP while that runs stops at once.
     pub fn stop(&mut self) {
+        if !self.demo && !self.stopping {
+            // Unanswered questions are skipped, and nothing more is queued.
+            for t in &mut self.tracks {
+                if matches!(t.state, TState::Have | TState::Queued) {
+                    t.state = TState::Skipped;
+                }
+            }
+            self.countdown = None;
+            if let Some(r) = self.run.as_mut() {
+                self.stopping = true;
+                r.finish();
+                return;
+            }
+            if self.phase == Phase::Running && !self.tracks.is_empty() {
+                self.finish();
+                return;
+            }
+        }
+        self.stop_now();
+    }
+
+    /// Stops at once: the files so far stay in the work folder.
+    pub fn stop_now(&mut self) {
+        self.stopping = false;
         self.demo_t0 = None;
         if let Some(mut r) = self.run.take() {
             r.stop();
@@ -473,14 +508,21 @@ impl State {
         self.next_only = None;
         self.open = None;
         self.out_dir.clear();
+        self.stopping = false;
+        self.login_problem = false;
+        self.stopped_early = false;
     }
 
     pub fn apply(&mut self, e: Event) {
         match e.ev.as_str() {
-            "phase" => self.stage = e.phase,
+            "phase" => {
+                self.stage = e.phase;
+                self.last_progress = self.now;
+            }
             "collection" => self.collection(e),
             "cover" => self.cover = e.path,
             "track" => {
+                self.last_progress = self.now;
                 let Some(t) = e.i.and_then(|i| self.tracks.get_mut(i)) else { return };
                 let Some(st) = TState::from(&e.state) else { return };
                 if st == TState::Downloading && t.state != TState::Downloading {
@@ -518,6 +560,7 @@ impl State {
                 }
             }
             "bytes" => {
+                self.last_progress = self.now;
                 let Some(t) = e.i.and_then(|i| self.tracks.get_mut(i)) else { return };
                 if e.bytes > t.bytes {
                     self.speed_bytes += e.bytes - t.bytes;
@@ -537,6 +580,7 @@ impl State {
             "login" => self.login_problem = true,
             "result" => {
                 self.run = None;
+                self.stopped_early |= e.stopped;
                 self.files += e.files;
                 if !e.dir.is_empty() {
                     self.out_dir = e.dir;
@@ -628,6 +672,10 @@ impl State {
         if self.phase != Phase::Running || self.run.is_some() || self.demo_t0.is_some() {
             return;
         }
+        if self.stopping {
+            self.stopping = false;
+            return self.finish();
+        }
         let queued: Vec<usize> = self.tracks.iter().enumerate().filter(|(_, t)| t.state == TState::Queued).map(|(i, _)| i).collect();
         if !queued.is_empty() {
             for &i in &queued {
@@ -682,7 +730,14 @@ impl State {
         if !self.persist || self.session_id.is_empty() {
             return;
         }
-        let tracks: Vec<SavedTrack> = self.tracks.iter().filter(|t| matches!(t.state, TState::Done | TState::Missing)).map(Track::saved).collect();
+        // A done track without a file (a run stopped at once) is still in the work folder: leave
+        // it out, or the history would show it as moved.
+        let tracks: Vec<SavedTrack> = self
+            .tracks
+            .iter()
+            .filter(|t| (t.state == TState::Done && !t.path.is_empty()) || (t.state == TState::Missing && !self.stopped_early))
+            .map(Track::saved)
+            .collect();
         if !tracks.iter().any(|t| t.state == "done") {
             return;
         }
@@ -816,6 +871,20 @@ impl State {
             self.countdown = None;
         }
         self.next_step();
+    }
+
+    /// Seconds Soulseek has sent nothing while tracks still wait to be searched, or None. Sockseek
+    /// allows only 34 searches every 220 s (more gets the account banned for 30 minutes), so long
+    /// lists pause; it does not report the pause, so it is seen from the silence.
+    pub fn soulseek_wait(&self) -> Option<f64> {
+        if self.phase != Phase::Running || self.stopping || self.stage != "soulseek" || self.downloading() {
+            return None;
+        }
+        if !self.tracks.iter().any(|t| t.in_run && matches!(t.state, TState::Pending | TState::Searching)) {
+            return None;
+        }
+        let quiet = self.now - self.last_progress;
+        (quiet >= 20.0).then_some(quiet)
     }
 
     /// Seconds left on the countdown.
@@ -1257,5 +1326,37 @@ mod tests {
         assert!(t >= ASK_ALL_SECS - 0.5, "skipped after {t} s");
         assert_eq!(s.tracks[0].state, TState::Skipped);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stop_keeps_finished_tracks_and_ends_on_the_poster() {
+        let ev = |line: &str| backend::parse(line).unwrap();
+        let mut s = State::new(None);
+        s.phase = Phase::Running;
+        s.apply(ev(r#"{"ev":"collection","name":"A","kind":"playlist","tracks":[{"artist":"A","title":"One"},{"artist":"B","title":"Two"}]}"#));
+        s.apply(ev(r#"{"ev":"track","i":0,"state":"done","source":"soulseek"}"#));
+        // STOP pressed while the backend runs: it converts what is done, then sends a result.
+        s.stopping = true;
+        s.apply(ev(r#"{"ev":"file","i":0,"path":"/out/One.mp3"}"#));
+        s.apply(ev(r#"{"ev":"result","files":1,"dir":"/out","stopped":true}"#));
+        assert_eq!(s.phase, Phase::Done, "the poster shows");
+        assert!(s.stopped_early && !s.stopping);
+        assert_eq!(s.tracks[0].path, "/out/One.mp3");
+        assert_eq!(s.tracks[1].state, TState::Missing);
+    }
+
+    #[test]
+    fn a_quiet_soulseek_shows_the_wait() {
+        let ev = |line: &str| backend::parse(line).unwrap();
+        let mut s = State::new(None);
+        s.phase = Phase::Running;
+        s.apply(ev(r#"{"ev":"collection","name":"A","kind":"playlist","tracks":[{"artist":"A","title":"One"},{"artist":"B","title":"Two"}]}"#));
+        s.apply(ev(r#"{"ev":"phase","phase":"soulseek"}"#));
+        s.tick(5.0);
+        assert!(s.soulseek_wait().is_none(), "not after 5 s");
+        s.tick(30.0);
+        assert!(s.soulseek_wait().is_some_and(|q| q >= 20.0));
+        s.apply(ev(r#"{"ev":"track","i":0,"state":"searching"}"#));
+        assert!(s.soulseek_wait().is_none(), "progress clears it");
     }
 }

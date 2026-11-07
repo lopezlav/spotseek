@@ -265,6 +265,16 @@ fn scene_idle_signed_out(s: &mut State) {
     s.account = account::Account::None;
 }
 
+/// A long list during Soulseek's search limit.
+fn scene_waiting(s: &mut State) {
+    scene_searching(s);
+    for t in s.tracks.iter_mut().take(6) {
+        t.state = TState::Done;
+    }
+    // 42 s without progress (the scene clock starts at 0).
+    s.last_progress = -42.0;
+}
+
 fn scene_failed(s: &mut State) {
     demo(s);
     s.phase = Phase::Failed;
@@ -294,6 +304,7 @@ fn main() {
             ("login", scene_login),
             ("settings-signed-out", scene_settings_signed_out),
             ("idle-signed-out", scene_idle_signed_out),
+            ("waiting", scene_waiting),
             ("settings", scene_settings),
         ],
         fonts: FONTS,

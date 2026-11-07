@@ -1,3 +1,13 @@
+## New in 0.2.2
+
+- **Linux.** A new download, `Spotseek-linux-x64.tar.gz`: unpack it and run `install.sh`
+  (app menu entry and a `spotseek` command).
+- **STOP keeps what is done.** The finished songs are converted into your folder and saved in the
+  history; only the rest is left out. Press STOP again to stop at once.
+- **No more "stuck" look on long lists.** Soulseek allows only 34 searches every 3:40, so long
+  playlists pause. Spotseek now says so ("waiting for Soulseek") and shows how long it has waited.
+- The sign-in window reminds you to save the password: Soulseek cannot reset it.
+
 ## New in 0.2.1
 
 - **Soulseek account at the first launch.** Spotseek asks you to sign in to Soulseek, and you can
@@ -33,8 +43,10 @@ The YouTube Music search and the My Spotify library are in **CLASSIC WINDOW**
   and drag Spotseek into Applications.
 - **Windows x64:** run the `Spotseek-Setup-*.exe` installer. The installer can install for
   your account without administrator access.
+- **Linux x64:** unpack `Spotseek-linux-x64.tar.gz` and run `Spotseek/install.sh`. Built on
+  Ubuntu 22.04; needs a desktop with a graphics driver, ALSA, D-Bus and ICU.
 - All required tools are bundled, including Deno for YouTube extraction.
-- `SHA256SUMS.txt` contains checksums for the two downloads.
+- `SHA256SUMS.txt` contains checksums for the downloads.
 
 These builds are unsigned (the Mac bundle has an ad-hoc signature, not Apple
 notarization). macOS may require Privacy & Security → Open Anyway after the

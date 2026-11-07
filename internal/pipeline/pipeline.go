@@ -69,8 +69,11 @@ type Options struct {
 	// front end can skip tracks the user already has. Events keep the
 	// indexes of the whole collection.
 	Select func(ctx context.Context, n int) ([]int, error)
-	logMu  sync.Mutex
-	track  *tracker
+	// Stop, when closed, ends the downloads early. The run still converts
+	// the finished files, sends their file events and a result (Stopped).
+	Stop  <-chan struct{}
+	logMu sync.Mutex
+	track *tracker
 }
 
 // Result summarizes a finished run.
@@ -277,17 +280,35 @@ func Run(ctx context.Context, o *Options) (result *Result, runErr error) {
 	}
 	soulseekHandled := false
 
+	// dlCtx ends with Stop: the downloads end, the conversion still runs.
+	dlCtx, dlCancel := context.WithCancel(ctx)
+	defer dlCancel()
+	if o.Stop != nil {
+		go func() {
+			select {
+			case <-o.Stop:
+				o.log("Stopping: converting the finished tracks...")
+				dlCancel()
+			case <-dlCtx.Done():
+			}
+		}()
+	}
+	stopped := func() bool { return dlCtx.Err() != nil && ctx.Err() == nil }
+
 	// The Soulseek phase gets its own time limit. A login problem or a dead
 	// network must not block the YouTube fallback forever.
-	ssCtx := ctx
+	ssCtx := dlCtx
 	if o.SockseekWait > 0 {
 		var ssCancel context.CancelFunc
-		ssCtx, ssCancel = context.WithTimeout(ctx, o.SockseekWait)
+		ssCtx, ssCancel = context.WithTimeout(dlCtx, o.SockseekWait)
 		defer ssCancel()
 	}
 	sockseekGaveUp := func(err error) bool {
 		if err == nil {
 			return false
+		}
+		if stopped() {
+			return true
 		}
 		if errors.Is(err, errSockseekAborted) {
 			return true
@@ -313,7 +334,7 @@ func Run(ctx context.Context, o *Options) (result *Result, runErr error) {
 				missing = allMissing(tracks)
 			}
 			if len(missing) > 0 && o.UseFallback {
-				fallback(ctx, o, missing, ytOut, prepared)
+				fallback(dlCtx, o, missing, ytOut, prepared)
 			}
 		}
 	}
@@ -324,7 +345,7 @@ func Run(ctx context.Context, o *Options) (result *Result, runErr error) {
 		missing = allMissing(tracks)
 		if o.UseFallback {
 			o.log("Trying YouTube Music for all tracks...")
-			fallback(ctx, o, missing, ytOut, prepared)
+			fallback(dlCtx, o, missing, ytOut, prepared)
 		}
 	} else if useAlbumMode {
 		// An album is usually shared as one folder. One search finds every track.
@@ -345,7 +366,7 @@ func Run(ctx context.Context, o *Options) (result *Result, runErr error) {
 			missing = allMissing(tracks)
 			if o.UseFallback {
 				o.log("Trying YouTube Music for all tracks...")
-				fallback(ctx, o, missing, ytOut, prepared)
+				fallback(dlCtx, o, missing, ytOut, prepared)
 			}
 		} else if err != nil {
 			return nil, err
@@ -357,10 +378,12 @@ func Run(ctx context.Context, o *Options) (result *Result, runErr error) {
 				o.log("%d tracks are not in the album folder", len(missing))
 				// Search Soulseek for each of them before YouTube: other
 				// peers often have the tracks this folder is missing.
-				missing = o.searchTracks(ssCtx, missing, safe+" (tracks)", ssOut)
-				if len(missing) > 0 && o.UseFallback {
+				if !stopped() {
+					missing = o.searchTracks(ssCtx, missing, safe+" (tracks)", ssOut)
+				}
+				if len(missing) > 0 && o.UseFallback && !stopped() {
 					o.log("Trying YouTube Music for the missing tracks...")
-					fallback(ctx, o, missing, ytOut, prepared)
+					fallback(dlCtx, o, missing, ytOut, prepared)
 				}
 			}
 		} else {
@@ -394,9 +417,9 @@ func Run(ctx context.Context, o *Options) (result *Result, runErr error) {
 		if len(missing) > 0 {
 			o.log("%d tracks missing from Soulseek", len(missing))
 		}
-		if len(missing) > 0 && o.UseFallback {
+		if len(missing) > 0 && o.UseFallback && !stopped() {
 			o.log("Trying YouTube Music for the missing tracks...")
-			fallback(ctx, o, missing, ytOut, prepared)
+			fallback(dlCtx, o, missing, ytOut, prepared)
 		}
 	}
 	if prepared != nil {
@@ -427,7 +450,7 @@ func Run(ctx context.Context, o *Options) (result *Result, runErr error) {
 	}
 	o.log("Done. %d files in %s", files, o.OutputDir)
 	o.emit(Event{Ev: "phase", Phase: "done"})
-	o.emit(Event{Ev: "result", Files: files, Count: len(tracks), Missing: len(missing), Dir: o.OutputDir, Name: coll.Name})
+	o.emit(Event{Ev: "result", Files: files, Count: len(tracks), Missing: len(missing), Dir: o.OutputDir, Name: coll.Name, Stopped: stopped()})
 	return res, nil
 }
 

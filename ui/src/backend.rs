@@ -36,6 +36,7 @@ pub struct Event {
     pub url: String,
     pub path: String,
     pub cover: String,
+    pub stopped: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -219,6 +220,15 @@ impl Run {
         if let Some(s) = self.stdin.as_mut() {
             let line = serde_json::json!({ "only": only }).to_string();
             let _ = writeln!(s, "{line}");
+            let _ = s.flush();
+        }
+    }
+
+    /// Ends the downloads early: the backend still converts the finished files and sends a
+    /// result (with `stopped`).
+    pub fn finish(&mut self) {
+        if let Some(s) = self.stdin.as_mut() {
+            let _ = writeln!(s, "{{\"stop\":true}}");
             let _ = s.flush();
         }
     }

@@ -203,6 +203,12 @@ fn status(s: &State) -> &'static str {
     if s.phase == Phase::Failed {
         return l.t("FAILED", "FALLÓ");
     }
+    if s.stopping {
+        return l.t("STOPPING · SAVING THE FINISHED SONGS", "FRENANDO · GUARDANDO LAS CANCIONES TERMINADAS");
+    }
+    if s.soulseek_wait().is_some() {
+        return l.t("WAITING FOR SOULSEEK", "ESPERANDO A SOULSEEK");
+    }
     let running = s.tracks.iter().any(|t| t.in_run);
     if !s.tracks.is_empty() && !running && s.asking() > 0 {
         return l.t("ALREADY IN YOUR FOLDER", "YA ESTÁ EN TU CARPETA");
@@ -282,6 +288,9 @@ fn working(s: &State, size: [f32; 2]) -> El {
         if s.login_problem || s.account == Account::None {
             below = below.child(account_banner(s));
         }
+        if let Some(quiet) = s.soulseek_wait() {
+            below = below.child(wait_banner(s, quiet));
+        }
         if s.asking() > 0 {
             below = below.child(ask_banner(s));
         }
@@ -292,7 +301,11 @@ fn working(s: &State, size: [f32; 2]) -> El {
         .child(row().key("stop").gap(8.0).center_y().cursor(Cursor::Pointer).role("button").label("Stop")
             .on_press(|s: &mut State| if s.phase == Phase::Running { s.stop() } else { s.new_link() })
             .child(el().size(16.0, 16.0).radius(8.0).border(2.0, ink()))
-            .child(text(if s.phase == Phase::Running { l.t("STOP", "FRENAR") } else { l.t("BACK", "VOLVER") }).font(mono(13.0, 600.0)).color(ink())))
+            .child(text(match (s.phase, s.stopping) {
+                (Phase::Running, true) => l.t("STOP NOW", "FRENAR YA"),
+                (Phase::Running, false) => l.t("STOP", "FRENAR"),
+                _ => l.t("BACK", "VOLVER"),
+            }).font(mono(13.0, 600.0)).color(ink())))
         .child(text(s.last_log.clone()).key("log").font(mono(11.0, 400.0)).color(muted()).truncate().grow(1.0).min_w(0.0))
         .child(text("SPOTSEEK").font(mono(13.0, 600.0)).color(ink()));
 
@@ -356,6 +369,23 @@ fn account_banner(s: &State) -> El {
         .child(row().key("account-banner-go").h(28.0).px(10.0).center().fill(red()).cursor(Cursor::Pointer).role("button")
             .on_press(|s: &mut State| s.settings_open = true)
             .child(text(l.t("ACCOUNT", "CUENTA")).font(mono(12.0, 600.0)).color(paper())))
+}
+
+/// Soulseek is quiet because of its search limit: say so, so it does not look stuck.
+fn wait_banner(s: &State, quiet: f64) -> El {
+    let l = s.lang;
+    let msg = format!(
+        "{} · {}",
+        l.t(
+            "WAITING FOR SOULSEEK: IT ALLOWS 34 SEARCHES EVERY 3:40, SO LONG LISTS PAUSE. IT GOES ON BY ITSELF",
+            "ESPERANDO A SOULSEEK: PERMITE 34 BÚSQUEDAS CADA 3:40, ASÍ QUE LAS LISTAS LARGAS HACEN PAUSAS. SIGUE SOLO",
+        ),
+        clock(quiet)
+    );
+    row().key("wait-banner").w_full().h(40.0).px(14.0).gap(12.0).center_y().border(2.0, ink()).fill(paper())
+        .transition(Transition::offset(0.0, -10.0).combined(Transition::opacity()))
+        .child(el().size(9.0, 9.0).radius(5.0).fill(ink()).cycle(BLINK))
+        .child(text(msg).key("wait-msg").font(mono(12.0, 600.0)).color(ink()).truncate().grow(1.0).min_w(0.0))
 }
 
 /// Tracks in rows, left to right. Under each row is a band that opens to show the details of
@@ -693,7 +723,7 @@ fn poster(s: &State, size: [f32; 2]) -> El {
             row_el = row_el.child(tag(l.t("ALREADY HAD", "YA ESTABA")));
         }
         if missing {
-            row_el = row_el.child(text(l.t("NOT FOUND", "NO ENCONTRADA")).font(mono((fs * 0.35).clamp(10.0, 16.0), 600.0)).color(ink()));
+            row_el = row_el.child(text(if s.stopped_early { l.t("NOT DOWNLOADED", "NO DESCARGADA") } else { l.t("NOT FOUND", "NO ENCONTRADA") }).font(mono((fs * 0.35).clamp(10.0, 16.0), 600.0)).color(ink()));
         }
         let open = (s.open.as_deref() == Some(key.as_str())).then_some(key);
         stripes = stripes.child(row_el).child(band(s, format!("pband-{i}"), open, size[0]));
@@ -713,7 +743,7 @@ fn poster(s: &State, size: [f32; 2]) -> El {
         stats += &format!(" · {had} {}", l.t("ALREADY HAD", "YA ESTABAN"));
     }
     if missing > 0 {
-        stats += &format!(" · {missing} {}", l.t("MISSING", "FALTAN"));
+        stats += &format!(" · {missing} {}", if s.stopped_early { l.t("NOT DOWNLOADED (STOPPED)", "SIN DESCARGAR (FRENADO)") } else { l.t("MISSING", "FALTAN") });
     }
     let top = row().key("poster-top").w_full().h(54.0).px(24.0).center_y().justify_between()
         .child(text(format!("{} {}", l.t("DONE.", "LISTO."), s.name.to_uppercase())).font(mono(15.0, 600.0)).color(ink()).truncate().shrink().min_w(0.0))
@@ -905,6 +935,10 @@ fn login_form(s: &State) -> El {
             "Soulseek is a free network where people share music. Spotseek downloads from it with your account. No account yet? Pick a name and a password here: if the name is free, the account is created.",
             "Soulseek es una red gratis donde la gente comparte música. Spotseek descarga de ahí con tu cuenta. ¿Todavía no tenés? Elegí un nombre y una contraseña acá: si el nombre está libre, la cuenta se crea.",
         )).key("login-about").font(mono(12.0, 500.0)).color(ink()).wrap())
+        .child(text(l.t(
+            "Save the password somewhere: Soulseek cannot reset it.",
+            "Guardá la contraseña en algún lado: Soulseek no la puede recuperar.",
+        )).key("login-save").font(mono(12.0, 600.0)).color(ink()).wrap())
         .child(row().w_full().gap(10.0)
             .child(boxed(field("login-user", &s.login_user).placeholder(l.t("name", "nombre"), muted()).on_edit(|s: &mut State| &mut s.login_user)).grow(1.0).min_w(0.0))
             .child(boxed(field("login-pass", &s.login_pass).secure().placeholder(l.t("password", "contraseña"), muted()).on_edit(|s: &mut State| &mut s.login_pass)).grow(1.0).min_w(0.0)));
