@@ -172,8 +172,7 @@ fn scene_have(s: &mut State) {
     }
     s.tracks[30].state = TState::Queued;
     s.tracks[30].in_run = false;
-    s.countdown = Some((0.0, model::ASK_SECS));
-    s.now = 3.6;
+    s.countdown = Some((model::ASK_SECS - 3.6, model::ASK_SECS));
 }
 
 /// Every track is already there.
@@ -184,8 +183,7 @@ fn scene_have_all(s: &mut State) {
         t.in_run = false;
     }
     s.stage = "done".into();
-    s.countdown = Some((0.0, model::ASK_ALL_SECS));
-    s.now = 2.0;
+    s.countdown = Some((model::ASK_ALL_SECS - 2.0, model::ASK_ALL_SECS));
 }
 
 /// The poster with the history under it, one history track open.
@@ -286,6 +284,7 @@ fn main() {
             }
             s.media.stop();
         })
+        .on_focus(|s: &mut State, focused, _| s.set_focus(focused))
         .compositor(gfx::Gfx::default())
         .run();
 }

@@ -280,7 +280,7 @@ fn ask_banner(s: &State) -> El {
     } else {
         msg += " · THEY ARE SKIPPED WHEN THE REST IS DONE";
     }
-    let frac = left.zip(s.countdown).map_or(1.0, |(l, (_, len))| (l / len) as f32);
+    let frac = s.countdown.map_or(1.0, |(l, len)| (l.max(0.0) / len) as f32);
     let small = |key: &str, label: &str, dark: bool| {
         let (bg, fg) = if dark { (ink(), yellow()) } else { (Color::TRANSPARENT, ink()) };
         row().key(key).h(30.0).px(12.0).center().fill(bg).border(2.0, ink()).cursor(Cursor::Pointer).role("button").label(label)
@@ -323,9 +323,10 @@ fn track_grid(s: &State, width: f32) -> El {
     col().key("tracks").w_full().grow(1.0).min_h(0.0).pb(10.0).scroll(ScrollSpec { stick_bottom: false }).child(grid)
 }
 
-/// Accordion motion: fast at the start, a long soft landing.
-const EASE_OUT: Easing = Easing::cubic(0.23, 1.0, 0.32, 1.0);
-const OPEN_SECS: f32 = 0.34;
+/// Accordion motion: snappy. Almost all of the height arrives in the first frames, then a
+/// short soft landing. The content is there from the first frame (no fade).
+const EASE_OUT: Easing = Easing::cubic(0.16, 1.0, 0.3, 1.0);
+const OPEN_SECS: f32 = 0.16;
 
 fn open_on_press(key: String) -> impl Fn(&mut State, &mut Tx) + 'static {
     move |s: &mut State, tx: &mut Tx| {
@@ -405,7 +406,6 @@ fn band(s: &State, key: String, open: Option<String>, width: f32) -> El {
 
 fn detail_panel(s: &State, key: &str, d: &Detail, width: f32) -> El {
     let light = paper().alpha(0.55);
-    let stagger = |e: El, k: usize| e.transition(Transition::offset(0.0, -10.0).combined(Transition::opacity())).enter_delay(0.04 + k as f32 * 0.045);
 
     // The cover, or a block in the stripe colour with the first letter.
     let mut cover = el().key("cover").size(PANEL_H - 36.0, PANEL_H - 36.0).border(2.0, paper()).clip_rounded(0.0);
@@ -473,15 +473,17 @@ fn detail_panel(s: &State, key: &str, d: &Detail, width: f32) -> El {
     };
 
     row().key(format!("panel-{key}")).w_full().h(PANEL_H).padding(18.0).gap(22.0).fill(ink())
-        .transition(Transition::opacity())
-        .child(stagger(cover, 0))
+        // Everything inside is there from the first frame; only the band's height moves.
+        .transition(Transition::none())
+        .instant_changes()
+        .child(cover)
         .child(col().key("info").grow(1.0).min_w(0.0).h_full().gap(10.0)
-            .child(stagger(col().key("names").w_full().gap(2.0).child(title_row)
-                .child(text(sub.to_uppercase()).font(mono(12.0, 500.0)).color(light).truncate()), 1))
-            .child(stagger(facts, 2))
+            .child(col().key("names").w_full().gap(2.0).child(title_row)
+                .child(text(sub.to_uppercase()).font(mono(12.0, 500.0)).color(light).truncate()))
+            .child(facts)
             .child(el().grow(1.0))
-            .child(stagger(player_el, 3))
-            .child(stagger(links, 4)))
+            .child(player_el)
+            .child(links))
 }
 
 /// The length of `path` in seconds: from the player, the waveform, or Spotify.
@@ -593,7 +595,8 @@ fn poster(s: &State, size: [f32; 2]) -> El {
     let sum: f32 = (0..n).map(|i| r.powi(i as i32)).sum();
     let mut stripes = col().key("stripes").w_full();
     for (i, t) in s.tracks.iter().enumerate() {
-        let h = (avail * r.powi(i as i32) / sum).clamp(13.0, 140.0).floor();
+        // Few tracks get bigger stripes.
+        let h = (avail * r.powi(i as i32) / sum).clamp(13.0, if n <= 3 { 220.0 } else { 140.0 }).floor();
         let fs = (h * 0.9).floor();
         let title = t.title.to_uppercase();
         let had = t.state == TState::Skipped || t.state == TState::Have;

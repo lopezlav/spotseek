@@ -228,8 +228,12 @@ pub struct State {
     pub cover: String,
     /// The open details panel: "c{i}" for a track of this run, "h{session}:{j}" in the history.
     pub open: Option<String>,
-    /// The "you already have these" countdown: (start, length) on the app clock.
+    /// The "you already have these" countdown: (seconds left, length). It only runs while
+    /// the window has focus, so nothing is skipped while the user cannot see the question.
     pub countdown: Option<(f64, f64)>,
+    last_tick: f64,
+    /// The window has keyboard focus.
+    pub focused: bool,
     /// A drag on a waveform: (path, 0..1).
     pub scrub: Option<(String, f32)>,
     /// The history screen, opened from the paste screen.
@@ -285,6 +289,8 @@ impl State {
             cover: String::new(),
             open: None,
             countdown: None,
+            last_tick: 0.0,
+            focused: true,
             scrub: None,
             show_history: false,
             media,
@@ -604,7 +610,8 @@ impl State {
         if self.asking() > 0 {
             if self.countdown.is_none() {
                 let all = self.tracks.iter().all(|t| matches!(t.state, TState::Have | TState::Skipped));
-                self.countdown = Some((self.now, if all { ASK_ALL_SECS } else { ASK_SECS }));
+                let len = if all { ASK_ALL_SECS } else { ASK_SECS };
+                self.countdown = Some((len, len));
             }
             return;
         }
@@ -698,7 +705,15 @@ impl State {
 
     /// Seconds left on the countdown.
     pub fn countdown_left(&self) -> Option<f64> {
-        self.countdown.map(|(t0, len)| (len - (self.now - t0)).max(0.0))
+        self.countdown.map(|(left, _)| left.max(0.0))
+    }
+
+    /// The window got or lost focus. Back in front, the user gets a few seconds at least.
+    pub fn set_focus(&mut self, focused: bool) {
+        self.focused = focused;
+        if let (true, Some((left, _))) = (focused, self.countdown.as_mut()) {
+            *left = left.max(4.0);
+        }
     }
 
     // ---------------------------------------------------------------- details
@@ -761,10 +776,16 @@ impl State {
     /// something changed.
     pub fn tick(&mut self, now: f64) -> bool {
         self.now = now;
+        // A long gap (the app was asleep) counts as a short one.
+        let dt = (now - self.last_tick).clamp(0.0, 0.25);
+        self.last_tick = now;
         let mut changed = false;
-        if let Some(left) = self.countdown_left() {
+        if let Some((left, _)) = self.countdown.as_mut() {
             changed = true;
-            if left <= 0.0 {
+            if self.focused {
+                *left -= dt;
+            }
+            if *left <= 0.0 {
                 self.decide_all(false);
             }
         }
