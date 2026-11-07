@@ -2,6 +2,17 @@ A new app window: paste a public Spotify track, album, or playlist link and
 watch it search, download, and turn into a poster of your tracks. Soulseek
 downloads use your own account; the YouTube fallback does not need one.
 
+- **Track details:** click a track to see its cover, where it came from (peer,
+  quality, size, speed, time), and play it with a waveform you can scrub.
+- **History:** every download is saved. When a link is done, you see its tracks
+  and then everything you downloaded before. Missing or moved files are gray.
+- **No accidental duplicates:** tracks already in your folder are not downloaded
+  again. Spotseek asks "again" or "skip" next to each one, and skips them if you
+  do not answer.
+- Better album downloads: a slow peer no longer shows tracks as NOT FOUND, each
+  file goes to the right track, and missing tracks are searched one by one on
+  Soulseek before YouTube.
+
 The YouTube Music search and the My Spotify library are in **CLASSIC WINDOW**
 (bottom right of the app).
 
