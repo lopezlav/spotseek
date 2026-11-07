@@ -49,7 +49,7 @@ fn on_key(s: &mut State, ev: &KeyEvent, _: &mut Tx) -> bool {
     match &ev.key {
         Key::Escape if s.settings_open => s.close_settings(),
         Key::Escape if s.open.is_some() => s.open = None,
-        Key::Text(t) if t == " " && s.open.is_some() && !s.link.focused => {
+        Key::Text(t) if t == " " && s.open.is_some() && !(s.phase == Phase::Idle && s.link.focused) => {
             if let Some(d) = s.open.clone().and_then(|k| s.detail_of(&k)) {
                 if !d.path.is_empty() && !s.demo {
                     s.media.toggle(&d.path);

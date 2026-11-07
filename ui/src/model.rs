@@ -564,11 +564,11 @@ impl State {
     }
 
     fn library_now(&self) -> Option<Library> {
-        if !self.persist {
-            return None;
-        }
         let ready = self.library.lock().unwrap().take();
-        Some(ready.unwrap_or_else(|| Library::scan(&self.history, &self.settings.dir)))
+        if ready.is_some() || !self.persist {
+            return ready;
+        }
+        Some(Library::scan(&self.history, &self.settings.dir))
     }
 
     /// A backend run has finished: what it could not find is missing. Then start the queued
@@ -1068,5 +1068,69 @@ mod tests {
             last = p;
         }
         assert!(last > 0.5);
+    }
+
+    #[test]
+    fn tracks_you_have_wait_for_an_answer_then_download_again() {
+        let ev = |line: &str| backend::parse(line).unwrap();
+        let mut s = State::new(None);
+        // The user already has "Only Time".
+        let dir = std::env::temp_dir().join(format!("spotseek-ask-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Enya - Only Time.mp3"), b"x").unwrap();
+        *s.library.lock().unwrap() = Some(Library::scan(&History::default(), dir.to_str().unwrap()));
+        s.phase = Phase::Running;
+        s.apply(ev(r#"{"ev":"collection","name":"A","kind":"album","tracks":[{"artist":"Enya","title":"Only Time"},{"artist":"Enya","title":"Wild Child"}]}"#));
+        assert_eq!(s.tracks[0].state, TState::Have);
+        assert!(!s.tracks[0].in_run && s.tracks[1].in_run);
+        s.apply(ev(r#"{"ev":"track","i":1,"state":"done","source":"soulseek","peer":"zwem"}"#));
+        s.apply(ev(r#"{"ev":"result","files":1,"dir":"/out"}"#));
+        // The run is over, but the question is open: no poster yet, a countdown instead.
+        assert_eq!(s.phase, Phase::Running);
+        assert!(s.countdown.is_some());
+        // No focus, no countdown: nothing is skipped behind the user's back.
+        s.set_focus(false);
+        for k in 1..200 {
+            s.tick(k as f64);
+        }
+        assert_eq!(s.tracks[0].state, TState::Have);
+        s.set_focus(true);
+        s.decide(0, true);
+        assert_eq!(s.tracks[0].state, TState::Pending, "queued for the follow-up run");
+        assert!(s.countdown.is_none());
+        // The follow-up run: same list, only track 0.
+        s.apply(ev(r#"{"ev":"collection","name":"A","kind":"album","tracks":[{"artist":"Enya","title":"Only Time"},{"artist":"Enya","title":"Wild Child"}]}"#));
+        assert!(s.tracks[0].in_run && !s.tracks[1].in_run);
+        assert_eq!(s.tracks[1].state, TState::Done, "the first run's result stays");
+        s.apply(ev(r#"{"ev":"track","i":0,"state":"done","source":"soulseek"}"#));
+        s.apply(ev(r#"{"ev":"file","i":0,"path":"/out/Only Time (1).mp3"}"#));
+        s.apply(ev(r#"{"ev":"result","files":1,"dir":"/out"}"#));
+        assert_eq!(s.phase, Phase::Done);
+        assert_eq!(s.files, 2);
+        assert_eq!(s.tracks[0].path, "/out/Only Time (1).mp3");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn unanswered_questions_are_skipped_after_the_countdown() {
+        let ev = |line: &str| backend::parse(line).unwrap();
+        let mut s = State::new(None);
+        let dir = std::env::temp_dir().join(format!("spotseek-skip-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Enya - Only Time.mp3"), b"x").unwrap();
+        *s.library.lock().unwrap() = Some(Library::scan(&History::default(), dir.to_str().unwrap()));
+        s.phase = Phase::Running;
+        s.apply(ev(r#"{"ev":"collection","name":"A","kind":"track","tracks":[{"artist":"Enya","title":"Only Time"}]}"#));
+        s.apply(ev(r#"{"ev":"result","dir":"/out"}"#));
+        assert_eq!(s.countdown.map(|c| c.1), Some(ASK_ALL_SECS), "everything is already there: the long countdown");
+        let mut t = 0.0;
+        while s.phase == Phase::Running && t < 60.0 {
+            t += 0.1;
+            s.tick(t);
+        }
+        assert_eq!(s.phase, Phase::Done);
+        assert!(t >= ASK_ALL_SECS - 0.5, "skipped after {t} s");
+        assert_eq!(s.tracks[0].state, TState::Skipped);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
