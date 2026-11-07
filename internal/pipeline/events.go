@@ -92,6 +92,10 @@ type tracker struct {
 	size   []int64        // file size of the current download per track
 	src    []string       // downloaded file (before conversion) per track
 	jobs   map[string]int // Sockseek job id -> track index
+	// album: Sockseek downloads one album folder at a time. A failed file
+	// then means "this folder failed", and Sockseek tries the next folder;
+	// only the end of the process says what is missing.
+	album bool
 }
 
 func newTracker(o *Options, tracks []spotify.Track) *tracker {
@@ -115,34 +119,94 @@ func trackKey(artist, title string) string {
 	return normTitle(artist) + "|" + normTitle(title)
 }
 
-// find returns the index of the track. With duplicates it prefers one that is
-// not finished. It falls back to a title-only match (album mode).
+// find returns the index of the track that Sockseek means. It tries, in order:
+// the exact artist and title; the exact title (also without "(feat. X)"-style
+// parts); the title in the peer's file name; and a part of the title, but
+// only when that points at one track. Sockseek reports album files with the
+// album artist and the peer's file name as the title, so loose matching
+// would put them on the wrong rows. With duplicates it prefers a track that
+// is not done.
 func (t *tracker) find(artist, title string) int {
-	idx := t.byKey[trackKey(artist, title)]
-	if len(idx) == 0 {
-		nt := normTitle(title)
-		if nt == "" {
-			return -1
+	return t.findFile(artist, title, "")
+}
+
+func (t *tracker) findFile(artist, title, filename string) int {
+	pick := func(idx []int) int {
+		for _, i := range idx {
+			if t.state[i] != StateDone {
+				return i
+			}
 		}
+		if len(idx) > 0 {
+			return idx[0]
+		}
+		return -1
+	}
+	if i := pick(t.byKey[trackKey(artist, title)]); i >= 0 {
+		return i
+	}
+	exact := func(name string) []int {
+		n := normTitle(name)
+		if n == "" {
+			return nil
+		}
+		var idx []int
+		for i, tr := range t.tracks {
+			if normTitle(tr.Title) == n {
+				idx = append(idx, i)
+			}
+		}
+		if len(idx) == 0 {
+			for i, tr := range t.tracks {
+				if normTitle(baseTitle(tr.Title)) == n || normTitle(tr.Title) == normTitle(baseTitle(name)) {
+					idx = append(idx, i)
+				}
+			}
+		}
+		return idx
+	}
+	if i := pick(exact(title)); i >= 0 {
+		return i
+	}
+	stem := ""
+	if filename != "" {
+		// Peers use \ or / in paths.
+		base := filename[strings.LastIndexAny(filename, `\/`)+1:]
+		stem = leadingNumber.ReplaceAllString(strings.TrimSuffix(base, filepath.Ext(base)), "")
+		if i := pick(exact(stem)); i >= 0 {
+			return i
+		}
+	}
+	for _, name := range []string{title, stem} {
+		nt := normTitle(name)
+		if nt == "" {
+			continue
+		}
+		var idx []int
 		for i, tr := range t.tracks {
 			ot := normTitle(tr.Title)
 			if ot != "" && (strings.Contains(nt, ot) || strings.Contains(ot, nt)) {
 				idx = append(idx, i)
 			}
 		}
-	}
-	for _, i := range idx {
-		if t.state[i] != StateDone {
-			return i
+		if len(idx) == 1 {
+			return idx[0]
 		}
-	}
-	if len(idx) > 0 {
-		return idx[0]
 	}
 	return -1
 }
 
+// set sends a state for track i. A track that is done stays done: Sockseek
+// can report a later attempt for a title that is already in the folder.
 func (t *tracker) set(i int, state string, e Event) {
+	if t.state[i] == StateDone && state != StateDone {
+		return
+	}
+	t.setAny(i, state, e)
+}
+
+// setAny is set without the guard, for the final check of an album folder.
+func (t *tracker) setAny(i int, state string, e Event) {
 	t.state[i] = state
 	e.Ev = "track"
 	e.I = intp(i)
@@ -161,6 +225,8 @@ type ssLine struct {
 		BytesTransferred int64  `json:"bytesTransferred"`
 		TotalBytes       int64  `json:"totalBytes"`
 		TerminalOutcome  string `json:"terminalOutcome"`
+		Filename         string `json:"filename"`
+		Extension        string `json:"extension"`
 		LifecycleState   string `json:"lifecycleState"`
 		ActivityPhase    string `json:"activityPhase"`
 		DownloadPath     string `json:"downloadPath"`
@@ -187,7 +253,11 @@ func (t *tracker) handle(line string) bool {
 			t.set(i, StateSearching, Event{})
 		}
 	case "download_start":
-		if i := t.find(d.Artist, d.Title); i >= 0 {
+		// Album folders also hold cover images and text files.
+		if ext := strings.TrimPrefix(strings.ToLower(d.Extension), "."); ext != "" && !audioExt("x."+ext) {
+			return true
+		}
+		if i := t.findFile(d.Artist, d.Title, d.Filename); i >= 0 {
 			t.size[i] = d.Size
 			t.set(i, StateDownloading, Event{Peer: d.Username, Total: d.Size, Source: "soulseek"})
 		}
@@ -213,7 +283,7 @@ func (t *tracker) handle(line string) bool {
 		}
 		t.o.emit(Event{Ev: "bytes", I: intp(i), Bytes: d.BytesTransferred, Total: d.TotalBytes})
 	case "track_state":
-		i := t.find(d.Artist, d.Title)
+		i := t.findFile(d.Artist, d.Title, d.Filename)
 		if i < 0 {
 			return true
 		}
@@ -233,7 +303,12 @@ func (t *tracker) handle(line string) bool {
 			// Already in the folder from an earlier run.
 			t.set(i, StateDone, Event{Source: "soulseek"})
 		case "Failed", "Cancelled":
-			t.set(i, StateFailed, Event{})
+			if t.album {
+				// This folder failed; Sockseek goes on with the next one.
+				t.set(i, StateSearching, Event{})
+			} else {
+				t.set(i, StateFailed, Event{})
+			}
 		}
 	}
 	return true

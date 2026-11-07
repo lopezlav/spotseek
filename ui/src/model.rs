@@ -476,6 +476,11 @@ impl State {
                 if st == TState::Done {
                     t.finished = history::now();
                     if t.total > 0 && !t.youtube {
+                        // Sockseek sends progress at most twice a second for all files
+                        // together; the end of a file often arrives only with "done".
+                        if t.total > t.bytes {
+                            self.speed_bytes += t.total - t.bytes;
+                        }
                         t.bytes = t.total;
                     }
                 }
