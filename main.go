@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -554,19 +555,23 @@ func openFolder(path string) {
 
 // reorderFlags moves flag arguments before positional ones so the Go flag
 // package can parse a command like: --cli <url> -o <dir>
-func reorderFlags(args []string) []string {
-	valueFlags := map[string]bool{
-		"-o": true, "--o": true,
-		"-bitrate": true, "--bitrate": true,
-		"-limit": true, "--limit": true,
-		"-user": true, "--user": true,
+// reorderFlags moves flags before the positional arguments, so the URL can come
+// first. Which flags take a value comes from fs.
+func reorderFlags(fs *flag.FlagSet, args []string) []string {
+	takesValue := func(a string) bool {
+		f := fs.Lookup(strings.TrimLeft(a, "-"))
+		if f == nil {
+			return false
+		}
+		b, ok := f.Value.(interface{ IsBoolFlag() bool })
+		return !ok || !b.IsBoolFlag()
 	}
 	var flags, positional []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if strings.HasPrefix(a, "-") {
 			flags = append(flags, a)
-			if !strings.Contains(a, "=") && valueFlags[a] && i+1 < len(args) {
+			if !strings.Contains(a, "=") && takesValue(a) && i+1 < len(args) {
 				i++
 				flags = append(flags, args[i])
 			}
@@ -588,7 +593,9 @@ func runCLI(args []string) {
 	events := fs.Bool("events", false, "print JSON progress events, one per line; stop when stdin closes")
 	user := fs.String("user", "", "Soulseek username")
 	passStdin := fs.Bool("pass-stdin", false, "read the Soulseek password from the first stdin line")
-	_ = fs.Parse(reorderFlags(args))
+	ask := fs.Bool("ask", false, `with --events: after the collection event, read {"only":[indexes]} (or {}) from stdin`)
+	coverOut := fs.String("cover-out", "", "with --events: save the collection cover image to this file")
+	_ = fs.Parse(reorderFlags(fs, args))
 	input := fs.Arg(0)
 	if input == "" {
 		fmt.Fprintln(os.Stderr, "usage: spotseek-app --cli <spotify-url> -o <dir>")
@@ -623,7 +630,7 @@ func runCLI(args []string) {
 		Log:            func(s string) { fmt.Println(s) },
 	}
 	if *events {
-		runEvents(opts, *passStdin)
+		runEvents(opts, *passStdin, *ask, *coverOut)
 		return
 	}
 	res, err := pipeline.Run(context.Background(), opts)
@@ -637,7 +644,7 @@ func runCLI(args []string) {
 
 // runEvents runs the pipeline for a front end (the Rune UI): one JSON event
 // per line on stdout. The front end closes stdin to stop the run.
-func runEvents(opts *pipeline.Options, passStdin bool) {
+func runEvents(opts *pipeline.Options, passStdin, ask bool, coverOut string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	stdin := bufio.NewReader(os.Stdin)
@@ -645,9 +652,22 @@ func runEvents(opts *pipeline.Options, passStdin bool) {
 		line, _ := stdin.ReadString('\n')
 		opts.SoulseekPass = strings.TrimRight(line, "\r\n")
 	}
-	// Cancelling the context also stops sockseek and yt-dlp.
+	// Later stdin lines are answers (--ask). End of input stops the run;
+	// cancelling the context also stops sockseek and yt-dlp.
+	answers := make(chan string, 4)
 	go func() {
-		_, _ = io.Copy(io.Discard, stdin)
+		for {
+			line, err := stdin.ReadString('\n')
+			if strings.TrimSpace(line) != "" {
+				select {
+				case answers <- line:
+				default:
+				}
+			}
+			if err != nil {
+				break
+			}
+		}
 		cancel()
 		// Spotify extraction does not watch the context. Do not keep
 		// running after the front end has gone.
@@ -656,11 +676,43 @@ func runEvents(opts *pipeline.Options, passStdin bool) {
 	}()
 	var mu sync.Mutex
 	enc := json.NewEncoder(os.Stdout)
-	opts.Log = nil
-	opts.Event = func(e pipeline.Event) {
+	emit := func(e pipeline.Event) {
 		mu.Lock()
 		defer mu.Unlock()
 		_ = enc.Encode(e)
+	}
+	opts.Log = nil
+	opts.Event = func(e pipeline.Event) {
+		emit(e)
+		if e.Ev == "collection" && e.Cover != "" && coverOut != "" {
+			go func(url string) {
+				if err := download(ctx, url, coverOut); err == nil {
+					emit(pipeline.Event{Ev: "cover", Path: coverOut})
+				}
+			}(e.Cover)
+		}
+	}
+	if ask {
+		opts.Select = func(ctx context.Context, n int) ([]int, error) {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case line := <-answers:
+				var a struct {
+					Only *[]int `json:"only"`
+				}
+				if err := json.Unmarshal([]byte(line), &a); err != nil {
+					return nil, fmt.Errorf("bad answer %q: %w", strings.TrimSpace(line), err)
+				}
+				if a.Only == nil {
+					return nil, nil
+				}
+				if *a.Only == nil {
+					return []int{}, nil
+				}
+				return *a.Only, nil
+			}
+		}
 	}
 	res, err := pipeline.Run(ctx, opts)
 	if err != nil {
@@ -668,10 +720,45 @@ func runEvents(opts *pipeline.Options, passStdin bool) {
 		if ctx.Err() != nil {
 			msg = "stopped"
 		}
-		opts.Event(pipeline.Event{Ev: "error", Message: msg})
+		emit(pipeline.Event{Ev: "error", Message: msg})
 		os.Exit(1)
 	}
 	_ = pipeline.WriteReport(res)
+}
+
+// download saves url to path (through a temporary file).
+func download(ctx context.Context, url, path string) error {
+	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(cctx, "GET", url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp := path + ".part"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(f, io.LimitReader(resp.Body, 8<<20))
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // runServe starts the headless server that Mixxx talks to.

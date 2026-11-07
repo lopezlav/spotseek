@@ -101,6 +101,45 @@ type entity struct {
 	Duration  int         `json:"duration"`
 	TrackList []trackItem `json:"trackList"`
 	Artists   []artistRef `json:"artists"`
+	Visual    struct {
+		Image []struct {
+			URL      string `json:"url"`
+			MaxWidth int    `json:"maxWidth"`
+		} `json:"image"`
+	} `json:"visualIdentity"`
+	CoverArt struct {
+		Sources []struct {
+			URL   string `json:"url"`
+			Width int    `json:"width"`
+		} `json:"sources"`
+	} `json:"coverArt"`
+}
+
+// cover returns the URL of the entity's image that is closest to 640 px wide.
+func (e *entity) cover() string {
+	best, bestD := "", 1<<30
+	pick := func(url string, w int) {
+		if url == "" {
+			return
+		}
+		d := w - 640
+		if d < 0 {
+			d = -d * 2 // smaller than wanted is worse than larger
+		}
+		if w == 0 {
+			d = 1 << 20
+		}
+		if d < bestD {
+			best, bestD = url, d
+		}
+	}
+	for _, im := range e.Visual.Image {
+		pick(im.URL, im.MaxWidth)
+	}
+	for _, im := range e.CoverArt.Sources {
+		pick(im.URL, im.Width)
+	}
+	return best
 }
 
 func nextDataOf(html string) (*nextData, error) {
@@ -165,11 +204,16 @@ func itemID(uri string) string {
 }
 
 func getTrack(id string) (Track, error) {
+	t, _, err := getTrackCover(id)
+	return t, err
+}
+
+func getTrackCover(id string) (Track, string, error) {
 	e, _, err := embed("track", id)
 	if err != nil {
-		return Track{}, err
+		return Track{}, "", err
 	}
-	return trackFromEntity(e), nil
+	return trackFromEntity(e), e.cover(), nil
 }
 
 func b62ToHex(s string) (string, error) {
@@ -244,12 +288,13 @@ func fetchTracksParallel(ids []string, workers int) map[string]Track {
 	return out
 }
 
-func playlistTracks(id string) (string, []Track, error) {
+func playlistTracks(id string) (string, string, []Track, error) {
 	e, token, err := embed("playlist", id)
 	if err != nil {
-		return "", nil, err
+		return "", "", nil, err
 	}
 	name := e.Name
+	cover := e.cover()
 	byID := map[string]Track{}
 	for _, it := range e.TrackList {
 		if tid := itemID(it.URI); tid != "" {
@@ -257,16 +302,16 @@ func playlistTracks(id string) (string, []Track, error) {
 		}
 	}
 	if token == "" {
-		return name, ordered(byID, itemOrder(e)), nil
+		return name, cover, ordered(byID, itemOrder(e)), nil
 	}
 	raw, err := httpGet("https://spclient.wg.spotify.com/playlist/v2/playlist/"+id,
 		map[string]string{"Authorization": "Bearer " + token, "Accept": "application/json"})
 	if err != nil {
-		return name, ordered(byID, itemOrder(e)), nil
+		return name, cover, ordered(byID, itemOrder(e)), nil
 	}
 	var pl spPlaylist
 	if err := json.Unmarshal([]byte(raw), &pl); err != nil {
-		return name, ordered(byID, itemOrder(e)), nil
+		return name, cover, ordered(byID, itemOrder(e)), nil
 	}
 	var ids []string
 	for _, it := range pl.Contents.Items {
@@ -283,7 +328,7 @@ func playlistTracks(id string) (string, []Track, error) {
 	for tid, t := range fetchTracksParallel(missing, 8) {
 		byID[tid] = t
 	}
-	return name, ordered(byID, ids), nil
+	return name, cover, ordered(byID, ids), nil
 }
 
 func withAlbum(tracks []Track, album string) []Track {
@@ -313,12 +358,13 @@ func ordered(byID map[string]Track, ids []string) []Track {
 	return out
 }
 
-func albumTracks(id string) (string, string, []Track, error) {
+func albumTracks(id string) (string, string, string, []Track, error) {
 	e, token, err := embed("album", id)
 	if err != nil {
-		return "", "", nil, err
+		return "", "", "", nil, err
 	}
 	name := e.Name
+	cover := e.cover()
 	artist := firstArtist(e.Subtitle)
 	byID := map[string]Track{}
 	for _, it := range e.TrackList {
@@ -327,20 +373,20 @@ func albumTracks(id string) (string, string, []Track, error) {
 		}
 	}
 	if token == "" {
-		return name, artist, withAlbum(ordered(byID, itemOrder(e)), name), nil
+		return name, artist, cover, withAlbum(ordered(byID, itemOrder(e)), name), nil
 	}
 	hexgid, err := b62ToHex(id)
 	if err != nil {
-		return name, artist, withAlbum(ordered(byID, itemOrder(e)), name), nil
+		return name, artist, cover, withAlbum(ordered(byID, itemOrder(e)), name), nil
 	}
 	raw, err := httpGet("https://spclient.wg.spotify.com/metadata/4/album/"+hexgid,
 		map[string]string{"Authorization": "Bearer " + token, "Accept": "application/json"})
 	if err != nil {
-		return name, artist, withAlbum(ordered(byID, itemOrder(e)), name), nil
+		return name, artist, cover, withAlbum(ordered(byID, itemOrder(e)), name), nil
 	}
 	var meta albumMeta
 	if err := json.Unmarshal([]byte(raw), &meta); err != nil {
-		return name, artist, withAlbum(ordered(byID, itemOrder(e)), name), nil
+		return name, artist, cover, withAlbum(ordered(byID, itemOrder(e)), name), nil
 	}
 	var ids []string
 	for _, disc := range meta.Disc {
@@ -359,7 +405,7 @@ func albumTracks(id string) (string, string, []Track, error) {
 	for tid, t := range fetchTracksParallel(missing, 8) {
 		byID[tid] = t
 	}
-	return name, artist, withAlbum(ordered(byID, ids), name), nil
+	return name, artist, cover, withAlbum(ordered(byID, ids), name), nil
 }
 
 // Collection is a resolved Spotify input.
@@ -368,6 +414,7 @@ type Collection struct {
 	Kind   string // "playlist", "album", or "track"
 	Name   string
 	Artist string // album artist, used for album-mode search
+	Cover  string // image URL: the album cover, or the playlist image
 	Tracks []Track
 }
 
@@ -379,22 +426,22 @@ func Extract(input string) (*Collection, error) {
 	}
 	switch kind {
 	case "track":
-		t, err := getTrack(id)
+		t, cover, err := getTrackCover(id)
 		if err != nil {
 			return nil, err
 		}
-		return &Collection{ID: id, Kind: "track", Name: t.Title, Artist: t.Artist, Tracks: []Track{t}}, nil
+		return &Collection{ID: id, Kind: "track", Name: t.Title, Artist: t.Artist, Cover: cover, Tracks: []Track{t}}, nil
 	case "album":
-		name, artist, tracks, err := albumTracks(id)
+		name, artist, cover, tracks, err := albumTracks(id)
 		if err != nil {
 			return nil, err
 		}
-		return &Collection{ID: id, Kind: "album", Name: name, Artist: artist, Tracks: tracks}, nil
+		return &Collection{ID: id, Kind: "album", Name: name, Artist: artist, Cover: cover, Tracks: tracks}, nil
 	default:
-		name, tracks, err := playlistTracks(id)
+		name, cover, tracks, err := playlistTracks(id)
 		if err != nil {
 			return nil, err
 		}
-		return &Collection{ID: id, Kind: "playlist", Name: name, Tracks: tracks}, nil
+		return &Collection{ID: id, Kind: "playlist", Name: name, Cover: cover, Tracks: tracks}, nil
 	}
 }

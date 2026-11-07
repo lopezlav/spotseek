@@ -1,10 +1,24 @@
 //! App state and what the backend's events do to it. No drawing here.
+//!
+//! One link is one session. A session can need more than one backend run: the first run
+//! downloads the tracks the user does not have yet, and asks about the others (tracks already in
+//! the folder). Each "download again" answer queues the track for a follow-up run. Questions
+//! that get no answer are skipped after a countdown that starts when nothing is downloading.
+
+use std::sync::{Arc, Mutex};
 
 use rune::{AppHandle, TextEdit};
 
 use crate::backend::{self, Event, Run};
 use crate::gfx;
-use crate::settings::Settings;
+use crate::history::{self, History, Library, SavedTrack, Session};
+use crate::media::Media;
+use crate::settings::{Settings, config_dir};
+
+/// Seconds the user has to answer "you already have these" once nothing else is downloading.
+pub const ASK_SECS: f64 = 10.0;
+/// The same when every track of the link is already there.
+pub const ASK_ALL_SECS: f64 = 20.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
@@ -14,8 +28,9 @@ pub enum Phase {
     Failed,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TState {
+    #[default]
     Pending,
     Searching,
     Downloading,
@@ -25,6 +40,12 @@ pub enum TState {
     YtSearch,
     YtDownload,
     Missing,
+    /// Already in the folder: waits for "download again" or "skip".
+    Have,
+    /// The user said "download again"; it goes in the next run.
+    Queued,
+    /// Already in the folder, and not downloaded again.
+    Skipped,
 }
 
 impl TState {
@@ -42,31 +63,123 @@ impl TState {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Track {
     pub artist: String,
     pub title: String,
+    pub album: String,
+    pub id: String,
+    /// Seconds, from Spotify.
+    pub duration: u32,
     pub state: TState,
     pub bytes: u64,
     pub total: u64,
     pub peer: String,
     pub youtube: bool,
+    pub url: String,
+    pub bitrate: u32,
+    /// The mp3 in the output folder, after the run.
+    pub path: String,
+    /// The file the user already has (for `Have` and `Skipped`).
+    pub have: String,
+    /// Unix seconds: when its download started and ended.
+    pub started: f64,
+    pub finished: f64,
+    /// Part of the backend run that is going on.
+    pub in_run: bool,
 }
 
 impl Track {
     pub fn new(artist: &str, title: &str) -> Track {
-        Track { artist: artist.into(), title: title.into(), state: TState::Pending, bytes: 0, total: 0, peer: String::new(), youtube: false }
+        Track { artist: artist.into(), title: title.into(), ..Default::default() }
     }
 
     /// How far this track is, 0 to 1.
     pub fn progress(&self) -> f32 {
         match self.state {
-            TState::Pending => 0.0,
+            TState::Pending | TState::Queued => 0.0,
             TState::Searching => 0.04,
             TState::Downloading => 0.06 + 0.94 * if self.total > 0 { self.bytes as f32 / self.total as f32 } else { 0.0 },
             TState::Failed | TState::YtSearch => 0.2,
             TState::YtDownload => 0.55,
-            TState::Done | TState::Missing => 1.0,
+            TState::Done | TState::Missing | TState::Have | TState::Skipped => 1.0,
+        }
+    }
+
+    fn saved(&self) -> SavedTrack {
+        let size = if self.youtube || self.total == 0 { std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0) } else { self.total };
+        SavedTrack {
+            artist: self.artist.clone(),
+            title: self.title.clone(),
+            album: self.album.clone(),
+            id: self.id.clone(),
+            duration: self.duration,
+            state: if self.state == TState::Done { "done" } else { "missing" }.into(),
+            source: if self.youtube { "youtube" } else if self.state == TState::Done { "soulseek" } else { "" }.into(),
+            peer: self.peer.clone(),
+            url: self.url.clone(),
+            bitrate: self.bitrate,
+            size,
+            path: self.path.clone(),
+            started: self.started,
+            finished: self.finished,
+        }
+    }
+}
+
+/// What the details panel of a track shows, from the run or from the history.
+#[derive(Clone, Debug, Default)]
+pub struct Detail {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub duration: u32,
+    /// "DOWNLOADED", "DOWNLOADING 64%", "NOT FOUND", …
+    pub status: String,
+    pub source: String,
+    pub peer: String,
+    pub url: String,
+    pub bitrate: u32,
+    pub size: u64,
+    /// The file to play, or empty.
+    pub path: String,
+    pub started: f64,
+    pub finished: f64,
+    /// An image file to show when the mp3 has no picture.
+    pub cover: String,
+    /// The file is gone from the folder.
+    pub moved: bool,
+}
+
+impl Detail {
+    /// Bytes per second over the whole download.
+    pub fn speed(&self) -> f64 {
+        let t = self.finished - self.started;
+        if self.size > 0 && t > 0.5 { self.size as f64 / t } else { 0.0 }
+    }
+
+    pub fn took(&self) -> f64 {
+        if self.finished > self.started && self.started > 0.0 { self.finished - self.started } else { 0.0 }
+    }
+
+    fn from_saved(t: &SavedTrack, cover: &str) -> Detail {
+        let moved = t.state == "done" && !t.path.is_empty() && !std::path::Path::new(&t.path).is_file();
+        Detail {
+            title: t.title.clone(),
+            artist: t.artist.clone(),
+            album: t.album.clone(),
+            duration: t.duration,
+            status: if t.state == "done" { if moved { "FILE MOVED OR DELETED" } else { "DOWNLOADED" } } else { "NOT FOUND" }.into(),
+            source: t.source.clone(),
+            peer: t.peer.clone(),
+            url: t.url.clone(),
+            bitrate: t.bitrate,
+            size: t.size,
+            path: if moved { String::new() } else { t.path.clone() },
+            started: t.started,
+            finished: t.finished,
+            cover: cover.to_string(),
+            moved,
         }
     }
 }
@@ -96,17 +209,45 @@ pub struct State {
     pub pass_edit: TextEdit,
     pub run: Option<Run>,
     pub run_id: u64,
+    /// The tracks the next run downloads (a follow-up run), or None for the first run.
+    next_only: Option<Vec<usize>>,
     pub running_link: String,
     pub handle: Option<AppHandle<State>>,
     /// `SPOTSEEK_DEMO=1`: runs play a scripted download on the app's clock, with no backend.
     pub demo: bool,
     demo_t0: Option<f64>,
     pub now: f64,
+    /// Saves history, logs and covers (not in tests, headless scenes or the demo).
+    persist: bool,
+    pub history: History,
+    library: Arc<Mutex<Option<Library>>>,
+    /// The session of the current link.
+    pub session_id: String,
+    session_started: f64,
+    /// The cover image file of the current link, once the backend has saved it.
+    pub cover: String,
+    /// The open details panel: "c{i}" for a track of this run, "h{session}:{j}" in the history.
+    pub open: Option<String>,
+    /// The "you already have these" countdown: (start, length) on the app clock.
+    pub countdown: Option<(f64, f64)>,
+    /// A drag on a waveform: (path, 0..1).
+    pub scrub: Option<(String, f32)>,
+    /// The history screen, opened from the paste screen.
+    pub show_history: bool,
+    pub media: Media,
 }
 
 impl State {
     pub fn new(handle: Option<AppHandle<State>>) -> State {
         let settings = Settings::load();
+        let demo = std::env::var_os("SPOTSEEK_DEMO").is_some_and(|v| v != "0");
+        let persist = handle.is_some() && !demo;
+        let wake = handle.clone();
+        let media = Media::new(move || {
+            if let Some(h) = &wake {
+                h.update(|_, _| {});
+            }
+        });
         State {
             link: TextEdit::new(""),
             phase: Phase::Idle,
@@ -130,17 +271,30 @@ impl State {
             settings_open: false,
             run: None,
             run_id: 0,
+            next_only: None,
             running_link: String::new(),
             handle,
-            demo: std::env::var_os("SPOTSEEK_DEMO").is_some_and(|v| v != "0"),
+            demo,
             demo_t0: None,
             now: 0.0,
+            persist,
+            history: if persist { History::load() } else { History::default() },
+            library: Arc::default(),
+            session_id: String::new(),
+            session_started: 0.0,
+            cover: String::new(),
+            open: None,
+            countdown: None,
+            scrub: None,
+            show_history: false,
+            media,
         }
     }
 
     /// Cmd-V with no field focused: the text becomes the link.
     pub fn paste(&mut self, text: &str) {
         if self.phase == Phase::Idle && !self.settings_open {
+            self.show_history = false;
             self.link.replace_text(text.trim());
             self.notice.clear();
         }
@@ -152,7 +306,9 @@ impl State {
             self.settings.dir = dir.to_string();
         }
         self.settings.user = self.user_edit.text.trim().to_string();
-        self.settings.save();
+        if self.persist {
+            self.settings.save();
+        }
         self.settings_open = false;
     }
 
@@ -161,6 +317,7 @@ impl State {
         spotify_link(&self.link.text)
     }
 
+    /// Starts a session for the pasted link.
     pub fn start(&mut self) {
         if self.phase == Phase::Running {
             return;
@@ -170,23 +327,47 @@ impl State {
             return;
         };
         self.reset_run();
+        self.show_history = false;
         self.phase = Phase::Running;
         self.stage = "spotify".into();
-        self.running_link = url.clone();
-        self.run_id += 1;
+        self.running_link = url;
+        self.session_started = history::now();
+        self.session_id = session_id();
         if self.demo {
+            self.run_id += 1;
             self.demo_t0 = Some(self.now);
             return;
         }
+        // Read the folder while Spotify answers; the collection event needs it.
+        if self.persist {
+            let (lib, hist, dir) = (self.library.clone(), self.history.clone(), self.settings.dir.clone());
+            *lib.lock().unwrap() = None;
+            std::thread::spawn(move || {
+                let l = Library::scan(&hist, &dir);
+                *lib.lock().unwrap() = Some(l);
+            });
+        }
+        self.next_only = None;
+        self.launch();
+    }
+
+    /// Starts a backend run for the current link.
+    fn launch(&mut self) {
+        self.run_id += 1;
+        self.countdown = None;
         let Some(handle) = self.handle.clone() else { return };
         let id = self.run_id;
+        let stamp = session_id();
         let req = backend::Request {
-            url,
+            url: self.running_link.clone(),
             dir: self.settings.dir.clone(),
             bitrate: self.settings.bitrate.clone(),
             fallback: self.settings.fallback,
             user: self.settings.user.clone(),
             pass: self.pass_edit.text.clone(),
+            ask: true,
+            cover_out: if self.persist && self.cover.is_empty() { config_dir().join("covers").join(format!("{}.jpg", self.session_id)).to_string_lossy().into_owned() } else { String::new() },
+            log: self.persist.then(|| config_dir().join("logs").join(format!("{stamp}.log"))),
         };
         let events = handle.clone();
         let exits = handle.clone();
@@ -196,7 +377,10 @@ impl State {
             move |msg| exits.update(move |s, _| if s.run_id == id { s.exited(msg) }),
         );
         match started {
-            Ok(run) => self.run = Some(run),
+            Ok(run) => {
+                self.stage = "spotify".into();
+                self.run = Some(run);
+            }
             Err(e) => {
                 self.phase = Phase::Failed;
                 self.error = e;
@@ -211,6 +395,8 @@ impl State {
         }
         // Events of the stopped run are ignored from here on.
         self.run_id += 1;
+        self.countdown = None;
+        self.save_session();
         self.phase = Phase::Idle;
         self.notice = "STOPPED. FILES SO FAR ARE IN THE WORK FOLDER.".into();
     }
@@ -221,9 +407,13 @@ impl State {
         if let Some(mut r) = self.run.take() {
             r.stop();
         }
+        if self.phase == Phase::Running {
+            self.save_session();
+        }
         self.run_id += 1;
         self.reset_run();
         self.phase = Phase::Idle;
+        self.show_history = false;
         self.link.replace_text("");
         self.link.focused = true;
     }
@@ -240,21 +430,26 @@ impl State {
         self.last_log.clear();
         self.speed = 0.0;
         self.speed_bytes = 0;
+        self.cover.clear();
+        self.countdown = None;
+        self.next_only = None;
+        self.open = None;
+        self.out_dir.clear();
     }
 
     pub fn apply(&mut self, e: Event) {
         match e.ev.as_str() {
             "phase" => self.stage = e.phase,
-            "collection" => {
-                self.name = e.name;
-                self.kind = e.kind;
-                self.tracks = e.tracks.iter().map(|t| Track::new(&t.artist, &t.title)).collect();
-            }
+            "collection" => self.collection(e),
+            "cover" => self.cover = e.path,
             "track" => {
                 let Some(t) = e.i.and_then(|i| self.tracks.get_mut(i)) else { return };
                 let Some(st) = TState::from(&e.state) else { return };
                 if st == TState::Downloading && t.state != TState::Downloading {
                     t.bytes = 0;
+                }
+                if matches!(st, TState::Downloading | TState::YtDownload) && t.started == 0.0 {
+                    t.started = history::now();
                 }
                 t.state = st;
                 if !e.peer.is_empty() {
@@ -263,11 +458,20 @@ impl State {
                 if e.total > 0 {
                     t.total = e.total;
                 }
+                if e.bitrate > 0 {
+                    t.bitrate = e.bitrate;
+                }
+                if !e.url.is_empty() {
+                    t.url = e.url;
+                }
                 if e.source == "youtube" {
                     t.youtube = true;
                 }
-                if st == TState::Done && t.total > 0 && !t.youtube {
-                    t.bytes = t.total;
+                if st == TState::Done {
+                    t.finished = history::now();
+                    if t.total > 0 && !t.youtube {
+                        t.bytes = t.total;
+                    }
                 }
             }
             "bytes" => {
@@ -280,20 +484,20 @@ impl State {
                     t.total = e.total;
                 }
             }
+            "file" => {
+                if let Some(t) = e.i.and_then(|i| self.tracks.get_mut(i)) {
+                    t.path = e.path;
+                }
+            }
             "convert" => self.convert = (e.done, e.count),
             "log" => self.last_log = e.line,
             "result" => {
-                self.phase = Phase::Done;
-                self.stage = "done".into();
-                self.files = e.files;
-                self.out_dir = e.dir;
                 self.run = None;
-                // Anything the backend never finished is missing.
-                for t in &mut self.tracks {
-                    if t.state != TState::Done {
-                        t.state = TState::Missing;
-                    }
+                self.files += e.files;
+                if !e.dir.is_empty() {
+                    self.out_dir = e.dir;
                 }
+                self.run_ended();
             }
             "error" => {
                 self.run = None;
@@ -308,17 +512,262 @@ impl State {
         }
     }
 
-    fn exited(&mut self, msg: Option<String>) {
-        self.run = None;
-        if self.phase == Phase::Running {
-            self.phase = Phase::Failed;
-            self.error = msg.unwrap_or_else(|| "the backend stopped without a result".into());
+    /// The track list: on the first run, find the tracks the user already has and tell the
+    /// backend to leave them out; on a follow-up run, ask for the queued tracks only.
+    fn collection(&mut self, e: Event) {
+        let only: Vec<usize> = if let Some(only) = self.next_only.take() {
+            if e.tracks.len() != self.tracks.len() {
+                self.error = "the track list changed on Spotify; paste the link again".into();
+                if let Some(r) = self.run.as_mut() {
+                    r.answer(&[]);
+                }
+                return;
+            }
+            only
+        } else {
+            self.name = e.name;
+            self.kind = e.kind;
+            self.tracks = e
+                .tracks
+                .iter()
+                .map(|t| Track { album: t.album.clone(), id: t.id.clone(), duration: t.duration, ..Track::new(&t.artist, &t.title) })
+                .collect();
+            let lib = self.library_now();
+            let mut only = Vec::new();
+            for (i, t) in self.tracks.iter_mut().enumerate() {
+                match lib.as_ref().and_then(|l| l.find(&t.id, &t.artist, &t.title)) {
+                    Some(p) => {
+                        t.have = p.to_string();
+                        t.state = TState::Have;
+                    }
+                    None => only.push(i),
+                }
+            }
+            only
+        };
+        for &i in &only {
+            if let Some(t) = self.tracks.get_mut(i) {
+                t.in_run = true;
+                t.state = TState::Pending;
+                t.bytes = 0;
+            }
+        }
+        if let Some(r) = self.run.as_mut() {
+            r.answer(&only);
         }
     }
 
-    /// Samples the download speed (and moves a demo run). True when something changed.
+    fn library_now(&self) -> Option<Library> {
+        if !self.persist {
+            return None;
+        }
+        let ready = self.library.lock().unwrap().take();
+        Some(ready.unwrap_or_else(|| Library::scan(&self.history, &self.settings.dir)))
+    }
+
+    /// A backend run has finished: what it could not find is missing. Then start the queued
+    /// tracks, or wait for the open questions, or end the session.
+    fn run_ended(&mut self) {
+        for t in &mut self.tracks {
+            if t.in_run {
+                t.in_run = false;
+                if t.state != TState::Done {
+                    t.state = TState::Missing;
+                }
+            }
+        }
+        self.speed = 0.0;
+        self.next_step();
+    }
+
+    fn next_step(&mut self) {
+        if self.phase != Phase::Running || self.run.is_some() || self.demo_t0.is_some() {
+            return;
+        }
+        let queued: Vec<usize> = self.tracks.iter().enumerate().filter(|(_, t)| t.state == TState::Queued).map(|(i, _)| i).collect();
+        if !queued.is_empty() {
+            for &i in &queued {
+                self.tracks[i].state = TState::Pending;
+            }
+            if self.demo {
+                for &i in &queued {
+                    let t = &mut self.tracks[i];
+                    t.state = TState::Done;
+                    t.path = format!("demo://{i}");
+                }
+                return self.next_step();
+            }
+            self.next_only = Some(queued);
+            self.launch();
+            return;
+        }
+        if self.asking() > 0 {
+            if self.countdown.is_none() {
+                let all = self.tracks.iter().all(|t| matches!(t.state, TState::Have | TState::Skipped));
+                self.countdown = Some((self.now, if all { ASK_ALL_SECS } else { ASK_SECS }));
+            }
+            return;
+        }
+        self.finish();
+    }
+
+    /// The session is over: show the poster, save it to the history.
+    fn finish(&mut self) {
+        self.countdown = None;
+        self.phase = Phase::Done;
+        self.stage = "done".into();
+        if self.out_dir.is_empty() {
+            self.out_dir = self.settings.dir.clone();
+        }
+        // A downloaded track whose file the backend did not name: look for it by its tags.
+        if self.persist && self.tracks.iter().any(|t| t.state == TState::Done && t.path.is_empty()) {
+            let lib = Library::scan(&History::default(), &self.out_dir);
+            for t in &mut self.tracks {
+                if t.state == TState::Done && t.path.is_empty() {
+                    if let Some(p) = lib.find("", &t.artist, &t.title) {
+                        t.path = p.to_string();
+                    }
+                }
+            }
+        }
+        self.save_session();
+    }
+
+    fn save_session(&mut self) {
+        if !self.persist || self.session_id.is_empty() {
+            return;
+        }
+        let tracks: Vec<SavedTrack> = self.tracks.iter().filter(|t| matches!(t.state, TState::Done | TState::Missing)).map(Track::saved).collect();
+        if !tracks.iter().any(|t| t.state == "done") {
+            return;
+        }
+        self.history.put(Session {
+            id: self.session_id.clone(),
+            link: self.running_link.clone(),
+            name: self.name.clone(),
+            kind: self.kind.clone(),
+            cover: self.cover.clone(),
+            dir: if self.out_dir.is_empty() { self.settings.dir.clone() } else { self.out_dir.clone() },
+            started: self.session_started,
+            finished: history::now(),
+            tracks,
+        });
+        self.history.save();
+    }
+
+    fn exited(&mut self, msg: Option<String>) {
+        self.run = None;
+        if self.phase == Phase::Running && msg.is_some() {
+            self.phase = Phase::Failed;
+            self.error = msg.unwrap_or_default();
+        }
+    }
+
+    // ---------------------------------------------------------------- questions
+
+    /// Tracks that wait for "download again" or "skip".
+    pub fn asking(&self) -> usize {
+        self.count(TState::Have)
+    }
+
+    /// The answer for track `i`: download it again, or skip it.
+    pub fn decide(&mut self, i: usize, again: bool) {
+        let Some(t) = self.tracks.get_mut(i) else { return };
+        if t.state != TState::Have {
+            return;
+        }
+        t.state = if again { TState::Queued } else { TState::Skipped };
+        self.after_answer(again);
+    }
+
+    pub fn decide_all(&mut self, again: bool) {
+        for t in &mut self.tracks {
+            if t.state == TState::Have {
+                t.state = if again { TState::Queued } else { TState::Skipped };
+            }
+        }
+        self.after_answer(again);
+    }
+
+    fn after_answer(&mut self, again: bool) {
+        if again || self.asking() == 0 {
+            self.countdown = None;
+        }
+        self.next_step();
+    }
+
+    /// Seconds left on the countdown.
+    pub fn countdown_left(&self) -> Option<f64> {
+        self.countdown.map(|(t0, len)| (len - (self.now - t0)).max(0.0))
+    }
+
+    // ---------------------------------------------------------------- details
+
+    /// Opens the details of `key`, or closes them when they are open.
+    pub fn toggle_open(&mut self, key: String) {
+        self.open = if self.open.as_deref() == Some(key.as_str()) { None } else { Some(key) };
+    }
+
+    pub fn detail_of(&self, key: &str) -> Option<Detail> {
+        if let Some(i) = key.strip_prefix('c').and_then(|s| s.parse::<usize>().ok()) {
+            return self.tracks.get(i).map(|t| self.detail(t));
+        }
+        let (sid, j) = key.strip_prefix('h')?.split_once(':')?;
+        let s = self.history.sessions.iter().find(|s| s.id == sid)?;
+        let t = s.tracks.get(j.parse::<usize>().ok()?)?;
+        Some(Detail::from_saved(t, if s.kind == "playlist" { "" } else { &s.cover }))
+    }
+
+    fn detail(&self, t: &Track) -> Detail {
+        let pct = if t.total > 0 { t.bytes * 100 / t.total } else { 0 };
+        let status = match t.state {
+            TState::Pending => "WAITING".into(),
+            TState::Searching => "SEARCHING SOULSEEK".into(),
+            TState::Downloading => format!("DOWNLOADING {pct}%"),
+            TState::Done => "DOWNLOADED".into(),
+            TState::Failed => "NOT ON SOULSEEK".into(),
+            TState::YtSearch => "SEARCHING YOUTUBE MUSIC".into(),
+            TState::YtDownload => "DOWNLOADING FROM YOUTUBE".into(),
+            TState::Missing => "NOT FOUND".into(),
+            TState::Have => "ALREADY IN YOUR FOLDER".into(),
+            TState::Queued => "WILL DOWNLOAD AGAIN".into(),
+            TState::Skipped => "ALREADY IN YOUR FOLDER · SKIPPED".into(),
+        };
+        let path = if !t.path.is_empty() { t.path.clone() } else { t.have.clone() };
+        let size = if t.total > 0 { t.total } else { std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) };
+        let finished = if t.state == TState::Downloading { history::now() } else { t.finished };
+        Detail {
+            title: t.title.clone(),
+            artist: t.artist.clone(),
+            album: t.album.clone(),
+            duration: t.duration,
+            status,
+            source: if t.youtube { "youtube" } else if t.peer.is_empty() { "" } else { "soulseek" }.into(),
+            peer: t.peer.clone(),
+            url: t.url.clone(),
+            bitrate: t.bitrate,
+            size: if t.state == TState::Downloading { t.bytes } else { size },
+            path,
+            started: t.started,
+            finished,
+            cover: if self.kind == "playlist" { String::new() } else { self.cover.clone() },
+            moved: false,
+        }
+    }
+
+    // ---------------------------------------------------------------- clock
+
+    /// Samples the download speed, runs the countdown (and moves a demo run). True when
+    /// something changed.
     pub fn tick(&mut self, now: f64) -> bool {
         self.now = now;
+        let mut changed = false;
+        if let Some(left) = self.countdown_left() {
+            changed = true;
+            if left <= 0.0 {
+                self.decide_all(false);
+            }
+        }
         if let Some(t0) = self.demo_t0 {
             if self.phase == Phase::Running {
                 self.demo_step(now - t0);
@@ -328,7 +777,7 @@ impl State {
         }
         let dt = now - self.speed_t;
         if dt < 0.5 {
-            return false;
+            return changed;
         }
         self.speed_t = now;
         let inst = self.speed_bytes as f32 / dt as f32;
@@ -338,7 +787,7 @@ impl State {
         if self.speed < 1000.0 {
             self.speed = 0.0;
         }
-        (old - self.speed).abs() > 1.0
+        changed || (old - self.speed).abs() > 1.0
     }
 
     /// The scripted demo run at `e` seconds after its start.
@@ -352,13 +801,25 @@ impl State {
         if self.tracks.is_empty() {
             self.name = "Fiesta 2005".into();
             self.kind = "playlist".into();
-            self.tracks = crate::DEMO.iter().map(|(a, t)| Track::new(a, t)).collect();
+            self.tracks = crate::DEMO.iter().map(|(a, t)| Track { duration: 180 + (hash(t.len()) * 90.0) as u32, ..Track::new(a, t) }).collect();
+            for (i, t) in self.tracks.iter_mut().enumerate() {
+                if crate::DEMO_HAVE.contains(&i) {
+                    t.state = TState::Have;
+                    t.have = format!("demo://{i}");
+                } else {
+                    t.in_run = true;
+                }
+            }
             self.stage = "soulseek".into();
         }
         let n = self.tracks.len();
         let mut rate = 0.0;
         let mut last_end = 0.0f64;
+        let now = history::now();
         for i in 0..n {
+            if !self.tracks[i].in_run {
+                continue;
+            }
             let search = 1.2 + i as f64 * 0.06;
             let start = 3.4 + i as f64 * 0.3;
             let dur = 1.0 + hash(i) * 1.4;
@@ -369,7 +830,7 @@ impl State {
             t.total = total;
             let end = start + dur;
             last_end = last_end.max(end + if failed { 2.5 } else { 0.0 });
-            t.state = if e < search {
+            let st = if e < search {
                 TState::Pending
             } else if e < start {
                 TState::Searching
@@ -380,8 +841,17 @@ impl State {
             } else {
                 TState::Done
             };
+            if st != t.state && matches!(st, TState::Downloading | TState::YtDownload) {
+                t.started = now;
+            }
+            if st != t.state && st == TState::Done {
+                t.finished = now;
+                t.path = format!("demo://{i}");
+            }
+            t.state = st;
             t.youtube = yt || failed;
-            t.peer = ["zwem", "xXdj_nico", "rodiganhomelab", "hfegetude", "djcotter"][i % 5].into();
+            t.bitrate = 320;
+            t.peer = if t.youtube { "YouTube Music".into() } else { ["zwem", "xXdj_nico", "rodiganhomelab", "hfegetude", "djcotter"][i % 5].into() };
             if t.state == TState::Downloading {
                 let p = ((e - start) / dur).clamp(0.0, 1.0);
                 t.bytes = (total as f64 * p) as u64;
@@ -401,11 +871,11 @@ impl State {
             self.convert = (k.min(n), n);
             self.last_log = format!("Normalizing to mp3 {}kbps...", self.settings.bitrate);
             if e > last_end + 1.8 {
-                self.phase = Phase::Done;
-                self.stage = "done".into();
+                self.demo_t0 = None;
                 self.files = self.count(TState::Done);
                 self.out_dir = self.settings.dir.clone();
-                self.demo_t0 = None;
+                self.stage = "done".into();
+                self.run_ended();
             }
         }
     }
@@ -414,30 +884,38 @@ impl State {
         self.tracks.iter().filter(|t| t.state == st).count()
     }
 
+    /// Tracks with nothing more to do in this session.
     pub fn finished(&self) -> usize {
-        self.tracks.iter().filter(|t| matches!(t.state, TState::Done | TState::Missing)).count()
+        self.tracks.iter().filter(|t| matches!(t.state, TState::Done | TState::Missing | TState::Skipped | TState::Have)).count()
     }
 
     pub fn downloading(&self) -> bool {
         self.tracks.iter().any(|t| matches!(t.state, TState::Downloading | TState::YtDownload))
     }
 
-    /// Overall progress, 0 to 1: the tracks, then the conversion.
+    /// Overall progress, 0 to 1: the tracks of this run, then the conversion.
     pub fn progress(&self) -> f32 {
         if self.phase == Phase::Done {
             return 1.0;
         }
-        if self.tracks.is_empty() {
-            return 0.0;
+        let run: Vec<&Track> = self.tracks.iter().filter(|t| t.in_run).collect();
+        if run.is_empty() {
+            return if self.tracks.is_empty() { 0.0 } else { 1.0 };
         }
-        let tracks = self.tracks.iter().map(Track::progress).sum::<f32>() / self.tracks.len() as f32;
+        let tracks = run.iter().map(|t| t.progress()).sum::<f32>() / run.len() as f32;
         let conv = if self.convert.1 > 0 { self.convert.0 as f32 / self.convert.1 as f32 } else { 0.0 };
         if self.stage == "convert" { 0.9 + 0.1 * conv } else { tracks * 0.9 }
     }
 
-    /// The peer that sends the newest download.
-    pub fn peer(&self) -> Option<&str> {
-        self.tracks.iter().rev().find(|t| matches!(t.state, TState::Downloading | TState::YtDownload)).map(|t| t.peer.as_str())
+    /// The peers that send files now, newest first, without repeats.
+    pub fn peers(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        for t in self.tracks.iter().rev() {
+            if matches!(t.state, TState::Downloading | TState::YtDownload) && !t.peer.is_empty() && !out.contains(&t.peer.as_str()) {
+                out.push(&t.peer);
+            }
+        }
+        out
     }
 
     /// Headline effect data: `[word, wobble, glitch, 0]`.
@@ -449,22 +927,52 @@ impl State {
                 let glitch = if has_text && !ok { 0.35 } else { 0.0 };
                 [gfx::W_PASTE, if ok { 1.0 } else { 0.0 }, glitch, 0.0]
             }
-            Phase::Running => match self.stage.as_str() {
-                "convert" => [gfx::W_CONVERTING, 0.4, 0.25, 0.0],
-                _ if self.downloading() || self.count(TState::Done) > 0 => [gfx::W_DOWNLOADING, 0.45, 0.12, 0.0],
-                _ => [gfx::W_SEARCHING, 0.6, 0.45, 0.0],
-            },
+            Phase::Running => {
+                let running = self.tracks.iter().any(|t| t.in_run || t.state == TState::Queued);
+                match self.stage.as_str() {
+                    "convert" if running => [gfx::W_CONVERTING, 0.4, 0.25, 0.0],
+                    _ if !self.tracks.is_empty() && !running && self.asking() > 0 => [gfx::W_HAVE, 0.3, 0.1, 0.0],
+                    _ if self.downloading() || self.count(TState::Done) > 0 => [gfx::W_DOWNLOADING, 0.45, 0.12, 0.0],
+                    _ => [gfx::W_SEARCHING, 0.6, 0.45, 0.0],
+                }
+            }
             Phase::Done => [gfx::W_DONE, 0.0, 0.0, 0.0],
             Phase::Failed => [gfx::W_FAILED, 0.2, 0.6, 0.0],
         }
     }
 
-    /// Progress bar effect data: `[fill, speed, active, tracks done]`.
+    /// Progress bar effect data: `[fill, speed, peers sending (0 to 4), tracks done]`.
     pub fn bar(&self) -> [f32; 4] {
         let speed = (self.speed / 2_500_000.0).clamp(0.0, 1.0);
-        let active = if self.phase == Phase::Running && self.downloading() { 1.0 } else { 0.0 };
-        [self.progress(), speed, active, self.count(TState::Done) as f32]
+        let peers = if self.phase == Phase::Running { self.peers().len().min(4) as f32 } else { 0.0 };
+        [self.progress(), speed, peers, self.count(TState::Done) as f32]
     }
+}
+
+/// A sortable id from the clock: "20261107-153012-123".
+fn session_id() -> String {
+    let t = history::now();
+    let secs = t as i64;
+    let ms = ((t - secs as f64) * 1000.0) as i64;
+    // Days since 1970 to a date (UTC), without a date library.
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (y, m, d) = civil(days);
+    format!("{y:04}{m:02}{d:02}-{:02}{:02}{:02}-{ms:03}", rem / 3600, rem / 60 % 60, rem % 60)
+}
+
+/// Days since 1970-01-01 to (year, month, day). From Howard Hinnant's `civil_from_days`.
+pub fn civil(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 /// Accepts `open.spotify.com/{playlist,album,track}/…` (with or without the scheme or an intl
@@ -494,6 +1002,7 @@ pub fn spotify_link(text: &str) -> Option<String> {
         None
     }
 }
+
 
 #[cfg(test)]
 mod tests {

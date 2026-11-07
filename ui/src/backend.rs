@@ -32,6 +32,10 @@ pub struct Event {
     pub dir: String,
     pub line: String,
     pub message: String,
+    pub bitrate: u32,
+    pub url: String,
+    pub path: String,
+    pub cover: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -40,6 +44,8 @@ pub struct TrackInfo {
     pub artist: String,
     pub title: String,
     pub duration: u32,
+    pub album: String,
+    pub id: String,
 }
 
 pub fn parse(line: &str) -> Option<Event> {
@@ -54,6 +60,12 @@ pub struct Request {
     pub fallback: bool,
     pub user: String,
     pub pass: String,
+    /// Wait after the collection event for [`Run::answer`]: which tracks to download.
+    pub ask: bool,
+    /// Where the backend saves the cover image, or empty.
+    pub cover_out: String,
+    /// Every line the backend writes (stdout and stderr) is copied here.
+    pub log: Option<PathBuf>,
 }
 
 /// A running backend. Dropping it does not stop the run; call `stop`.
@@ -110,6 +122,12 @@ impl Run {
         if with_pass {
             cmd.arg("--pass-stdin");
         }
+        if req.ask {
+            cmd.arg("--ask");
+        }
+        if !req.cover_out.is_empty() {
+            cmd.arg("--cover-out").arg(&req.cover_out);
+        }
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         #[cfg(windows)]
         {
@@ -136,10 +154,14 @@ impl Run {
         let child = Arc::new(Mutex::new(child));
         let waiter = child.clone();
         let err_tail: Arc<Mutex<Vec<String>>> = Arc::default();
+        let log = Log::open(req.log.as_deref());
+        log.line(&format!("# spotseek {} {}", env!("CARGO_PKG_VERSION"), req.url));
         if let Some(stderr) = stderr {
             let tail = err_tail.clone();
+            let log = log.clone();
             std::thread::spawn(move || {
                 for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                    log.line(&format!("# stderr: {line}"));
                     let mut t = tail.lock().unwrap();
                     t.push(line);
                     let n = t.len();
@@ -157,6 +179,7 @@ impl Run {
             let _job = reader_job;
             let mut ended = false;
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                log.line(&line);
                 if let Some(e) = parse(&line) {
                     ended |= e.ev == "result" || e.ev == "error";
                     on_event(e);
@@ -168,6 +191,7 @@ impl Run {
                 }
                 std::thread::sleep(Duration::from_millis(50));
             };
+            log.line(&format!("# exit: {status:?}"));
             let msg = match status {
                 Some(s) if !s.success() && !ended => {
                     let tail = err_tail.lock().unwrap().join("\n");
@@ -183,6 +207,15 @@ impl Run {
             #[cfg(windows)]
             job,
         })
+    }
+
+    /// Answers the backend's question (`Request::ask`): download only these tracks.
+    pub fn answer(&mut self, only: &[usize]) {
+        if let Some(s) = self.stdin.as_mut() {
+            let line = serde_json::json!({ "only": only }).to_string();
+            let _ = writeln!(s, "{line}");
+            let _ = s.flush();
+        }
     }
 
     /// Asks the backend to stop (closes its stdin), and kills it if it is still running after
@@ -203,6 +236,39 @@ impl Run {
                 job.terminate();
             }
         });
+    }
+}
+
+/// A log file that several threads write lines to.
+#[derive(Clone)]
+struct Log(Option<Arc<Mutex<std::fs::File>>>);
+
+impl Log {
+    fn open(path: Option<&std::path::Path>) -> Log {
+        let file = path.and_then(|p| {
+            if let Some(dir) = p.parent() {
+                let _ = std::fs::create_dir_all(dir);
+                prune(dir, 40);
+            }
+            std::fs::File::create(p).ok()
+        });
+        Log(file.map(|f| Arc::new(Mutex::new(f))))
+    }
+
+    fn line(&self, line: &str) {
+        if let Some(f) = &self.0 {
+            let _ = writeln!(f.lock().unwrap(), "{line}");
+        }
+    }
+}
+
+/// Deletes the oldest log files in `dir` so at most `keep` stay.
+fn prune(dir: &std::path::Path, keep: usize) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let mut logs: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "log")).collect();
+    logs.sort();
+    while logs.len() >= keep {
+        let _ = std::fs::remove_file(logs.remove(0));
     }
 }
 

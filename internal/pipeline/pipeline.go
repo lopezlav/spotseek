@@ -64,8 +64,13 @@ type Options struct {
 	Preparation     *PreparedTrack
 	// Event, if set, receives structured progress events (see events.go).
 	Event func(Event)
-	logMu sync.Mutex
-	track *tracker
+	// Select, if set, is called after the collection event with the number
+	// of tracks. It returns the indexes to download (nil: all of them), so a
+	// front end can skip tracks the user already has. Events keep the
+	// indexes of the whole collection.
+	Select func(ctx context.Context, n int) ([]int, error)
+	logMu  sync.Mutex
+	track  *tracker
 }
 
 // Result summarizes a finished run.
@@ -144,7 +149,15 @@ func Run(ctx context.Context, o *Options) (result *Result, runErr error) {
 	}()
 	setup := timing.Begin(ctx, "pipeline.setup", "")
 	if o.WorkDir == "" {
-		o.WorkDir = filepath.Join(o.OutputDir, ".work")
+		// Each run gets its own work folder. A shared one made every run
+		// convert (and copy again) all the files of the runs before it.
+		o.WorkDir = filepath.Join(o.OutputDir, ".work", "run-"+time.Now().Format("20060102-150405.000"))
+		defer func() {
+			// Keep the files of a stopped or failed run, as the front ends say.
+			if runErr == nil || len(walkAudio(o.WorkDir)) == 0 {
+				_ = os.RemoveAll(o.WorkDir)
+			}
+		}()
 	}
 	if o.Bitrate == "" {
 		o.Bitrate = "320"
@@ -196,14 +209,38 @@ func Run(ctx context.Context, o *Options) (result *Result, runErr error) {
 	}
 	o.log("Collection: %s (%d tracks)", coll.Name, len(tracks))
 	if o.Event != nil {
-		ce := Event{Ev: "collection", Name: coll.Name, Kind: coll.Kind, Artist: coll.Artist}
+		ce := Event{Ev: "collection", Name: coll.Name, Kind: coll.Kind, Artist: coll.Artist, Cover: coll.Cover}
 		for _, t := range tracks {
-			ce.Tracks = append(ce.Tracks, TrackEvent{Artist: t.Artist, Title: t.Title, Duration: t.DurationSec})
+			ce.Tracks = append(ce.Tracks, TrackEvent{Artist: t.Artist, Title: t.Title, Duration: t.DurationSec, Album: t.Album, ID: t.ID})
 		}
 		o.emit(ce)
 		o.track = newTracker(o, tracks)
-		o.emit(Event{Ev: "phase", Phase: "soulseek"})
 	}
+	all := tracks
+	if o.Select != nil {
+		only, err := o.Select(ctx, len(tracks))
+		if err != nil {
+			return nil, err
+		}
+		if only != nil {
+			var sel []spotify.Track
+			seen := map[int]bool{}
+			for _, i := range only {
+				if i >= 0 && i < len(all) && !seen[i] {
+					seen[i] = true
+					sel = append(sel, all[i])
+				}
+			}
+			tracks = sel
+		}
+	}
+	if len(tracks) == 0 {
+		// Every track was skipped: nothing to download.
+		o.emit(Event{Ev: "phase", Phase: "done"})
+		o.emit(Event{Ev: "result", Files: 0, Count: 0, Dir: o.OutputDir, Name: coll.Name})
+		return &Result{Collection: coll.Name, OutputDir: o.OutputDir}, nil
+	}
+	o.emit(Event{Ev: "phase", Phase: "soulseek"})
 
 	safe := ytdlp.SafeName(coll.Name)
 	if safe == "" {
@@ -219,7 +256,9 @@ func Run(ctx context.Context, o *Options) (result *Result, runErr error) {
 	ssOut := filepath.Join(o.WorkDir, "soulseek")
 	ytOut := filepath.Join(o.WorkDir, "youtube")
 	var missing []missingTrack
-	useAlbumMode := coll.Kind == "album" && coll.Artist != ""
+	// The album folder holds every track, so album mode only fits a run of
+	// the whole album.
+	useAlbumMode := coll.Kind == "album" && coll.Artist != "" && len(tracks) == len(all)
 	// Server jobs contain one track. Prepare a fallback candidate while the
 	// Soulseek process searches/transfers, but never download speculative audio.
 	// Multi-track CLI/album runs stay lazy to avoid searching every song twice.
@@ -590,7 +629,12 @@ func fallback(ctx context.Context, o *Options, missing []missingTrack, ytOut str
 			o.trackState(m, StateMissing, Event{})
 			continue
 		}
-		o.trackState(m, StateDone, Event{Source: "youtube", Peer: "YouTube Music"})
+		if o.track != nil {
+			if i := o.track.findLocked(m.Artist, m.Title); i >= 0 {
+				o.track.setSrc(i, filepath.Join(ytOut, name+".mp3"))
+			}
+		}
+		o.trackState(m, StateDone, Event{Source: "youtube", Peer: "YouTube Music", URL: best.URL})
 	}
 }
 
@@ -662,6 +706,16 @@ func normalizeAll(ctx context.Context, o *Options, sources []string, destDir str
 			total += len(walkAudio(srcDir))
 		}
 	}
+	used := map[int]bool{}
+	placed := func(src, dest string) {
+		if o.track == nil {
+			return
+		}
+		if i := o.track.fileIndex(src, used); i >= 0 {
+			used[i] = true
+			o.emit(Event{Ev: "file", I: intp(i), Path: dest})
+		}
+	}
 	for _, srcDir := range sources {
 		end := timing.Begin(ctx, "normalize.scan", filepath.Base(srcDir))
 		audio := walkAudio(srcDir)
@@ -690,24 +744,44 @@ func normalizeAll(ctx context.Context, o *Options, sources []string, destDir str
 					continue
 				}
 				count++
+				placed(src, dest)
 				continue
 			}
-			cctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 			end = timing.Begin(ctx, "normalize.ffmpeg", filepath.Base(src))
-			cmd := exec.CommandContext(cctx, o.FfmpegPath, "-y", "-loglevel", "error", "-i", src,
-				"-vn", "-map_metadata", "0", "-c:a", "libmp3lame", "-b:a", o.Bitrate+"k", dest)
-			err := cmd.Run()
+			// Keep the cover picture. A source whose picture ffmpeg cannot
+			// put in an mp3 is converted again without it.
+			err := transcode(ctx, o, src, dest, true)
+			if err != nil && ctx.Err() == nil {
+				err = transcode(ctx, o, src, dest, false)
+			}
 			end(err)
-			cancel()
 			if err != nil {
 				o.log("transcode failed for %s: %v", filepath.Base(src), err)
 				continue
 			}
 			count++
+			placed(src, dest)
 		}
 	}
 	o.emit(Event{Ev: "convert", Done: total, Count: total})
 	return count, nil
+}
+
+func transcode(ctx context.Context, o *Options, src, dest string, cover bool) error {
+	cctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	args := []string{"-y", "-loglevel", "error", "-i", src}
+	if cover {
+		args = append(args, "-map", "0:a:0", "-map", "0:v:0?", "-c:v", "copy", "-disposition:v:0", "attached_pic", "-id3v2_version", "3")
+	} else {
+		args = append(args, "-vn")
+	}
+	args = append(args, "-map_metadata", "0", "-c:a", "libmp3lame", "-b:a", o.Bitrate+"k", dest)
+	err := exec.CommandContext(cctx, o.FfmpegPath, args...).Run()
+	if err != nil {
+		_ = os.Remove(dest)
+	}
+	return err
 }
 
 // markAlbum marks the tracks found in an album folder as done, and the rest as failed.

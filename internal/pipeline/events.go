@@ -2,6 +2,8 @@ package pipeline
 
 import (
 	"encoding/json"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -29,6 +31,16 @@ type Event struct {
 	Source string `json:"source,omitempty"`
 	Bytes  int64  `json:"bytes,omitempty"`
 	Total  int64  `json:"total,omitempty"`
+	// BitRate is the kbps of the Soulseek file; URL is the YouTube page of a
+	// fallback download.
+	BitRate int    `json:"bitrate,omitempty"`
+	URL     string `json:"url,omitempty"`
+
+	// file: Path is the final mp3 of track I in the output folder.
+	Path string `json:"path,omitempty"`
+
+	// collection: Cover is a URL of the cover image (albums and tracks).
+	Cover string `json:"cover,omitempty"`
 
 	// convert and result
 	Done    int    `json:"done,omitempty"`
@@ -47,6 +59,8 @@ type TrackEvent struct {
 	Artist   string `json:"artist"`
 	Title    string `json:"title"`
 	Duration int    `json:"duration"`
+	Album    string `json:"album,omitempty"`
+	ID       string `json:"id,omitempty"` // Spotify track id
 }
 
 // Track states sent in track events.
@@ -76,6 +90,7 @@ type tracker struct {
 	byKey  map[string][]int // normalized "artist|title" -> indexes
 	state  []string
 	size   []int64        // file size of the current download per track
+	src    []string       // downloaded file (before conversion) per track
 	jobs   map[string]int // Sockseek job id -> track index
 }
 
@@ -86,6 +101,7 @@ func newTracker(o *Options, tracks []spotify.Track) *tracker {
 		byKey:  map[string][]int{},
 		state:  make([]string, len(tracks)),
 		size:   make([]int64, len(tracks)),
+		src:    make([]string, len(tracks)),
 		jobs:   map[string]int{},
 	}
 	for i, tr := range tracks {
@@ -145,6 +161,10 @@ type ssLine struct {
 		BytesTransferred int64  `json:"bytesTransferred"`
 		TotalBytes       int64  `json:"totalBytes"`
 		TerminalOutcome  string `json:"terminalOutcome"`
+		LifecycleState   string `json:"lifecycleState"`
+		ActivityPhase    string `json:"activityPhase"`
+		DownloadPath     string `json:"downloadPath"`
+		BitRate          int    `json:"bitRate"`
 	} `json:"data"`
 }
 
@@ -197,15 +217,78 @@ func (t *tracker) handle(line string) bool {
 		if i < 0 {
 			return true
 		}
+		// Sockseek sends track_state on every change of a job, also while it
+		// still searches, waits in a queue or downloads (outcome "None"). Only
+		// a terminal job has a result.
+		if d.LifecycleState != "" && d.LifecycleState != "Terminal" {
+			return true
+		}
 		switch d.TerminalOutcome {
-		case "Succeeded":
-			t.set(i, StateDone, Event{Peer: d.Username, Total: d.Size, Source: "soulseek"})
+		case "Succeeded", "PartialSuccess":
+			if d.DownloadPath != "" {
+				t.src[i] = filepath.Clean(d.DownloadPath)
+			}
+			t.set(i, StateDone, Event{Peer: d.Username, Total: d.Size, BitRate: d.BitRate, Source: "soulseek"})
 		case "Skipped":
 			// Already in the folder from an earlier run.
 			t.set(i, StateDone, Event{Source: "soulseek"})
-		default:
+		case "Failed", "Cancelled":
 			t.set(i, StateFailed, Event{})
 		}
 	}
 	return true
+}
+
+var leadingNumber = regexp.MustCompile(`^[0-9]{1,3}\s*[-._)]?\s*`)
+
+// fileIndex returns the track that a downloaded file belongs to, or -1. It
+// uses the path Sockseek reported, then the file name: "Artist - Title"
+// (YouTube, per-track Soulseek) or "07 - Title" (album folders).
+func (t *tracker) fileIndex(src string, used map[int]bool) int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	clean := filepath.Clean(src)
+	for i, p := range t.src {
+		if p != "" && p == clean && !used[i] {
+			return i
+		}
+	}
+	name := strings.TrimSuffix(filepath.Base(src), filepath.Ext(src))
+	name = leadingNumber.ReplaceAllString(name, "")
+	nn := normTitle(name)
+	best, bestLen := -1, 0
+	for i, tr := range t.tracks {
+		if used[i] {
+			continue
+		}
+		for _, title := range []string{tr.Title, baseTitle(tr.Title)} {
+			nt := normTitle(title)
+			if nt == "" || !strings.Contains(nn, nt) {
+				continue
+			}
+			// The longest matching title wins ("Thriller" vs "Thriller - Instrumental").
+			score := len(nt)
+			if na := normTitle(tr.Artist); na != "" && strings.Contains(nn, na) {
+				score += 1000
+			}
+			if score > bestLen {
+				best, bestLen = i, score
+			}
+		}
+	}
+	return best
+}
+
+// findLocked is find for callers that do not hold the lock.
+func (t *tracker) findLocked(artist, title string) int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.find(artist, title)
+}
+
+// setSrc records the downloaded file of track i (YouTube downloads).
+func (t *tracker) setSrc(i int, path string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.src[i] = filepath.Clean(path)
 }
