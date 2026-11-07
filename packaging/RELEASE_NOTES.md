@@ -1,3 +1,14 @@
+## New in 0.2.1
+
+- **Soulseek account at the first launch.** Spotseek asks you to sign in to Soulseek, and you can
+  create the account right there: pick a name and a password (Soulseek has no sign-up page; a new
+  name creates the account). The password is kept in the macOS Keychain or the Windows Credential
+  Manager. You can skip it, but then everything comes from YouTube Music, which is slower. A red
+  dot on SETTINGS shows while there is no account.
+- **English and Spanish**, following the system language (or choose it in SETTINGS).
+- Enter saves the settings and signs you in. "New link" is now "New download".
+- A clear message when the computer's clock is wrong (secure connections then fail).
+
 A new app window: paste a public Spotify track, album, or playlist link and
 watch it search, download, and turn into a poster of your tracks. Soulseek
 downloads use your own account; the YouTube fallback does not need one.

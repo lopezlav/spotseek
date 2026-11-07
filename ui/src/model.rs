@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex};
 
 use rune::{AppHandle, TextEdit};
 
+use crate::account::{self, Account, Check};
 use crate::backend::{self, Event, Run};
+use crate::i18n::Lang;
 use crate::gfx;
 use crate::history::{self, History, Library, SavedTrack, Session};
 use crate::media::Media;
@@ -149,6 +151,8 @@ pub struct Detail {
     pub cover: String,
     /// The file is gone from the folder.
     pub moved: bool,
+    /// Something went wrong (not found, moved): the status shows in red.
+    pub bad: bool,
 }
 
 impl Detail {
@@ -162,14 +166,19 @@ impl Detail {
         if self.finished > self.started && self.started > 0.0 { self.finished - self.started } else { 0.0 }
     }
 
-    fn from_saved(t: &SavedTrack, cover: &str) -> Detail {
+    fn from_saved(t: &SavedTrack, cover: &str, l: Lang) -> Detail {
         let moved = t.state == "done" && !t.path.is_empty() && !std::path::Path::new(&t.path).is_file();
         Detail {
             title: t.title.clone(),
             artist: t.artist.clone(),
             album: t.album.clone(),
             duration: t.duration,
-            status: if t.state == "done" { if moved { "FILE MOVED OR DELETED" } else { "DOWNLOADED" } } else { "NOT FOUND" }.into(),
+            status: if t.state == "done" {
+                if moved { l.t("FILE MOVED OR DELETED", "EL ARCHIVO SE MOVIÓ O SE BORRÓ") } else { l.t("DOWNLOADED", "DESCARGADA") }
+            } else {
+                l.t("NOT FOUND", "NO ENCONTRADA")
+            }
+            .into(),
             source: t.source.clone(),
             peer: t.peer.clone(),
             url: t.url.clone(),
@@ -180,6 +189,7 @@ impl Detail {
             finished: t.finished,
             cover: cover.to_string(),
             moved,
+            bad: moved || t.state != "done",
         }
     }
 }
@@ -205,8 +215,18 @@ pub struct State {
     pub settings: Settings,
     pub settings_open: bool,
     pub dir_edit: TextEdit,
-    pub user_edit: TextEdit,
-    pub pass_edit: TextEdit,
+    /// The Soulseek account the runs use.
+    pub account: Account,
+    /// The sign-in form (first launch, and in the settings).
+    pub login_user: TextEdit,
+    pub login_pass: TextEdit,
+    pub login_busy: bool,
+    pub login_error: String,
+    /// The sign-in window that opens at launch while there is no account.
+    pub login_open: bool,
+    /// Sockseek could not sign in during a run (wrong password, account in use elsewhere).
+    pub login_problem: bool,
+    pub lang: Lang,
     pub run: Option<Run>,
     pub run_id: u64,
     /// The tracks the next run downloads (a follow-up run), or None for the first run.
@@ -269,8 +289,14 @@ impl State {
             speed_bytes: 0,
             speed_t: 0.0,
             dir_edit: TextEdit::new(&settings.dir),
-            user_edit: TextEdit::new(&settings.user),
-            pass_edit: TextEdit::new("").secure(),
+            account: if persist { account::current(&settings.user) } else { Account::None },
+            login_user: TextEdit::new(&settings.user),
+            login_pass: TextEdit::new("").secure(),
+            login_busy: false,
+            login_error: String::new(),
+            login_open: false,
+            login_problem: false,
+            lang: Lang::from_setting(&settings.lang),
             settings,
             settings_open: false,
             run: None,
@@ -311,7 +337,6 @@ impl State {
         if !dir.is_empty() {
             self.settings.dir = dir.to_string();
         }
-        self.settings.user = self.user_edit.text.trim().to_string();
         if self.persist {
             self.settings.save();
         }
@@ -329,7 +354,7 @@ impl State {
             return;
         }
         let Some(url) = self.link_url() else {
-            self.notice = "THAT IS NOT A SPOTIFY LINK".into();
+            self.notice = self.lang.t("THAT IS NOT A SPOTIFY LINK", "ESO NO ES UN LINK DE SPOTIFY").into();
             return;
         };
         self.reset_run();
@@ -369,9 +394,16 @@ impl State {
             dir: self.settings.dir.clone(),
             bitrate: self.settings.bitrate.clone(),
             fallback: self.settings.fallback,
-            user: self.settings.user.clone(),
-            pass: self.pass_edit.text.clone(),
+            user: match &self.account {
+                Account::App(u, _) => u.clone(),
+                _ => String::new(),
+            },
+            pass: match &self.account {
+                Account::App(_, p) => p.clone(),
+                _ => String::new(),
+            },
             ask: true,
+            skip_soulseek: self.account == Account::None,
             cover_out: if self.persist && self.cover.is_empty() { config_dir().join("covers").join(format!("{}.jpg", self.session_id)).to_string_lossy().into_owned() } else { String::new() },
             log: self.persist.then(|| config_dir().join("logs").join(format!("{stamp}.log"))),
         };
@@ -404,7 +436,7 @@ impl State {
         self.countdown = None;
         self.save_session();
         self.phase = Phase::Idle;
-        self.notice = "STOPPED. FILES SO FAR ARE IN THE WORK FOLDER.".into();
+        self.notice = self.lang.t("STOPPED. FILES SO FAR ARE IN THE WORK FOLDER.", "FRENADO. LO QUE SE DESCARGÓ ESTÁ EN LA CARPETA DE TRABAJO.").into();
     }
 
     /// Back to the paste screen for a new link.
@@ -502,6 +534,7 @@ impl State {
             }
             "convert" => self.convert = (e.done, e.count),
             "log" => self.last_log = e.line,
+            "login" => self.login_problem = true,
             "result" => {
                 self.run = None;
                 self.files += e.files;
@@ -675,6 +708,83 @@ impl State {
         }
     }
 
+    // ---------------------------------------------------------------- account
+
+    /// Opens the sign-in window at launch when there is no account.
+    pub fn ask_login_at_launch(&mut self) {
+        if self.persist && self.account == Account::None {
+            self.login_open = true;
+            self.login_user.focused = true;
+        }
+    }
+
+    /// Signs in (or creates the account) with the name and password in the form.
+    pub fn sign_in(&mut self) {
+        let user = self.login_user.text.trim().to_string();
+        let pass = self.login_pass.text.clone();
+        if user.is_empty() || pass.is_empty() {
+            self.login_error = self.lang.t("Type a name and a password.", "Escribí un nombre y una contraseña.").into();
+            return;
+        }
+        if self.login_busy {
+            return;
+        }
+        self.login_busy = true;
+        self.login_error.clear();
+        let Some(h) = self.handle.clone() else {
+            self.login_busy = false;
+            return;
+        };
+        std::thread::spawn(move || {
+            let r = account::check(&user, &pass);
+            h.update(move |s, _| s.signed_in(r, user, pass));
+        });
+    }
+
+    pub fn signed_in(&mut self, r: Check, user: String, pass: String) {
+        self.login_busy = false;
+        let l = self.lang;
+        match r {
+            Check::Ok => {
+                if let Err(e) = account::save(&user, &pass) {
+                    // It works for this session; it is asked again at the next launch.
+                    self.login_error = format!("{}: {e}", l.t("Signed in, but the password could not be saved", "Entraste, pero no se pudo guardar la contraseña"));
+                } else {
+                    self.login_error.clear();
+                }
+                self.settings.user = user.clone();
+                if self.persist {
+                    self.settings.save();
+                }
+                self.account = Account::App(user, pass);
+                self.login_pass.replace_text("");
+                self.login_open = false;
+                self.login_problem = false;
+            }
+            Check::WrongPassword => self.login_error = l.t("That name is taken, or the password is wrong.", "Ese nombre ya existe o la contraseña es incorrecta.").into(),
+            Check::BadName => self.login_error = l.t("Soulseek does not accept that name: up to 30 letters, numbers or symbols, no accents.", "Soulseek no acepta ese nombre: hasta 30 letras, números o símbolos, sin tildes.").into(),
+            Check::ServerFull => self.login_error = l.t("The Soulseek server is full. Try again later.", "El servidor de Soulseek está lleno. Probá más tarde.").into(),
+            Check::Error(e) => self.login_error = format!("{} {e}", l.t("Cannot reach Soulseek:", "No se puede conectar con Soulseek:")),
+        }
+    }
+
+    pub fn sign_out(&mut self) {
+        if let Account::App(u, _) = &self.account {
+            account::forget(u);
+        }
+        self.settings.user.clear();
+        if self.persist {
+            self.settings.save();
+        }
+        self.account = if self.persist { account::current("") } else { Account::None };
+        self.login_user.replace_text("");
+    }
+
+    pub fn set_lang(&mut self, setting: &str) {
+        self.settings.lang = setting.to_string();
+        self.lang = Lang::from_setting(setting);
+    }
+
     // ---------------------------------------------------------------- questions
 
     /// Tracks that wait for "download again" or "skip".
@@ -735,23 +845,24 @@ impl State {
         let (sid, j) = key.strip_prefix('h')?.split_once(':')?;
         let s = self.history.sessions.iter().find(|s| s.id == sid)?;
         let t = s.tracks.get(j.parse::<usize>().ok()?)?;
-        Some(Detail::from_saved(t, if s.kind == "playlist" { "" } else { &s.cover }))
+        Some(Detail::from_saved(t, if s.kind == "playlist" { "" } else { &s.cover }, self.lang))
     }
 
     fn detail(&self, t: &Track) -> Detail {
         let pct = if t.total > 0 { t.bytes * 100 / t.total } else { 0 };
+        let l = self.lang;
         let status = match t.state {
-            TState::Pending => "WAITING".into(),
-            TState::Searching => "SEARCHING SOULSEEK".into(),
-            TState::Downloading => format!("DOWNLOADING {pct}%"),
-            TState::Done => "DOWNLOADED".into(),
-            TState::Failed => "NOT ON SOULSEEK".into(),
-            TState::YtSearch => "SEARCHING YOUTUBE MUSIC".into(),
-            TState::YtDownload => "DOWNLOADING FROM YOUTUBE".into(),
-            TState::Missing => "NOT FOUND".into(),
-            TState::Have => "ALREADY IN YOUR FOLDER".into(),
-            TState::Queued => "WILL DOWNLOAD AGAIN".into(),
-            TState::Skipped => "ALREADY IN YOUR FOLDER · SKIPPED".into(),
+            TState::Pending => l.t("WAITING", "ESPERANDO").into(),
+            TState::Searching => l.t("SEARCHING SOULSEEK", "BUSCANDO EN SOULSEEK").into(),
+            TState::Downloading => format!("{} {pct}%", l.t("DOWNLOADING", "DESCARGANDO")),
+            TState::Done => l.t("DOWNLOADED", "DESCARGADA").into(),
+            TState::Failed => l.t("NOT ON SOULSEEK", "NO ESTÁ EN SOULSEEK").into(),
+            TState::YtSearch => l.t("SEARCHING YOUTUBE MUSIC", "BUSCANDO EN YOUTUBE MUSIC").into(),
+            TState::YtDownload => l.t("DOWNLOADING FROM YOUTUBE", "DESCARGANDO DE YOUTUBE").into(),
+            TState::Missing => l.t("NOT FOUND", "NO ENCONTRADA").into(),
+            TState::Have => l.t("ALREADY IN YOUR FOLDER", "YA ESTÁ EN TU CARPETA").into(),
+            TState::Queued => l.t("WILL DOWNLOAD AGAIN", "SE VA A DESCARGAR DE NUEVO").into(),
+            TState::Skipped => l.t("ALREADY IN YOUR FOLDER · SKIPPED", "YA ESTÁ EN TU CARPETA · SALTEADA").into(),
         };
         let path = if !t.path.is_empty() { t.path.clone() } else { t.have.clone() };
         let size = if t.total > 0 { t.total } else { std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) };
@@ -772,6 +883,7 @@ impl State {
             finished,
             cover: if self.kind == "playlist" { String::new() } else { self.cover.clone() },
             moved: false,
+            bad: t.state == TState::Missing,
         }
     }
 
@@ -944,8 +1056,16 @@ impl State {
         out
     }
 
-    /// Headline effect data: `[word, wobble, glitch, 0]`.
+    /// Headline effect data: `[word, wobble, glitch, 0]`. Spanish words follow the English ones.
     pub fn headline(&self) -> [f32; 4] {
+        let mut d = self.headline_en();
+        if self.lang.es() {
+            d[0] += gfx::WORDS_PER_LANG as f32;
+        }
+        d
+    }
+
+    fn headline_en(&self) -> [f32; 4] {
         match self.phase {
             Phase::Idle => {
                 let has_text = !self.link.text.trim().is_empty();

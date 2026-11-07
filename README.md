@@ -92,6 +92,12 @@ closes. With `--ask`, it waits after the track list for one stdin line,
 - The headline and the liquid-metal progress bar are our own shader
   (`ui/src/liquid.wgsl`) at Rune effect slots. The headline words are signed
   distance fields (`ui/src/sdf.rs`), so one word can flow into the next.
+- At launch, the window asks for a Soulseek account until there is one (it can be skipped:
+  then everything comes from YouTube Music). Soulseek has no sign-up page; signing in with a new
+  name creates the account, as Nicotine+ does. `spotseek-backend --cli --check-login --user NAME`
+  (password on stdin) signs in once and prints `{"ok":…}`. The password is kept in the macOS
+  Keychain or the Windows Credential Manager; an account in `sockseek.conf` also works.
+- The texts are in English and Spanish, by the system language (`SPOTSEEK_LANG=es` to test).
 - Click a track to open its details: cover, source, peer, quality, size,
   average speed, time, and a player (space plays and pauses).
 - Tracks that are already in the output folder (from the history, or by their

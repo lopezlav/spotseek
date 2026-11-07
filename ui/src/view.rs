@@ -8,7 +8,9 @@ use rune::{
 };
 use rune_motion::Cycle;
 
+use crate::account::Account;
 use crate::gfx;
+use crate::i18n::{self, Lang};
 use crate::media::{Cover, Wave, clock};
 use crate::model::{Detail, Phase, State, TState, Track};
 
@@ -46,6 +48,15 @@ fn display(size: f32) -> TextStyle {
 }
 
 const BLINK: Cycle = Cycle { period: 0.9, phase: 0.0, stops: &[(0.0, 1.0), (0.55, 1.0), (0.56, 0.15), (1.0, 0.15)], still: 1.0, fps: 6.0 };
+/// The ring of the "something to do" dot: it grows faint, again and again.
+const PING: Cycle = Cycle { period: 1.4, phase: 0.0, stops: &[(0.0, 0.9), (0.7, 0.0), (1.0, 0.0)], still: 0.6, fps: 30.0 };
+
+/// A red dot with a pulsing ring: there is something to do here (sign in to Soulseek).
+fn ping(key: &str) -> El {
+    el().key(key).size(10.0, 10.0).inert()
+        .child(el().absolute(-5.0, -5.0).size(20.0, 20.0).radius(10.0).border(2.0, red()).cycle(PING))
+        .child(el().size(10.0, 10.0).radius(5.0).fill(red()))
+}
 
 fn button(key: &str, label: &str, dark: bool) -> El {
     let (bg, fg) = if dark { (ink(), paper()) } else { (Color::TRANSPARENT, ink()) };
@@ -76,6 +87,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .child(body);
     if s.settings_open {
         root = root.child(settings_panel(s));
+    } else if s.login_open {
+        root = root.child(login_window(s));
     }
     root
 }
@@ -105,6 +118,7 @@ fn headline(s: &State, label: &str) -> El {
 // ------------------------------------------------------------------ 1. paste
 
 fn idle(s: &State, size: [f32; 2]) -> El {
+    let l = s.lang;
     let ok = s.link_url().is_some();
     let has_text = !s.link.text.trim().is_empty();
     let field_w = (size[0] - 220.0).clamp(280.0, 680.0);
@@ -123,34 +137,48 @@ fn idle(s: &State, size: [f32; 2]) -> El {
     let hint = if !s.notice.is_empty() {
         s.notice.clone()
     } else if has_text && !ok {
-        "THAT IS NOT A SPOTIFY LINK. PLAYLISTS, ALBUMS AND TRACKS WORK.".into()
+        l.t("THAT IS NOT A SPOTIFY LINK. PLAYLISTS, ALBUMS AND TRACKS WORK.", "ESO NO ES UN LINK DE SPOTIFY. FUNCIONAN PLAYLISTS, ÁLBUMES Y CANCIONES.").into()
     } else if ok {
-        "PRESS ENTER ↵ TO DOWNLOAD".into()
+        l.t("PRESS ENTER ↵ TO DOWNLOAD", "APRETÁ ENTER ↵ PARA DESCARGAR").into()
     } else {
-        "PASTE WITH ⌘V ANYWHERE · PLAYLIST, ALBUM OR TRACK".into()
+        format!("{} {} {}", l.t("PASTE WITH", "PEGÁ CON"), l.paste_keys(), l.t("ANYWHERE · PLAYLIST, ALBUM OR TRACK", "EN CUALQUIER LADO · PLAYLIST, ÁLBUM O CANCIÓN"))
     };
+    let no_account = s.account == Account::None;
     let hint_color = if has_text && !ok { red() } else { muted() };
     let footer = row().w_full().h(40.0).center_y().justify_between()
         .child(text(format!("{} · MP3 {}", s.settings.short_dir(), s.settings.bitrate)).key("where").font(mono(14.0, 500.0)).color(ink())
             .cursor(Cursor::Pointer).on_press(|s: &mut State| s.settings_open = true))
         .child(row().gap(28.0)
-            .child(link_text("classic", "CLASSIC WINDOW").on_press(|s: &mut State| {
+            .child(link_text("classic", l.t("CLASSIC WINDOW", "VENTANA CLÁSICA")).on_press(|s: &mut State| {
                 if let Err(e) = crate::backend::open_classic() {
                     s.notice = e.to_uppercase();
                 }
             }))
-            .child(link_text("open-history", "HISTORY").on_press(|s: &mut State| {
+            .child(link_text("open-history", l.t("HISTORY", "HISTORIAL")).on_press(|s: &mut State| {
                 s.show_history = true;
                 s.open = None;
             }))
-            .child(link_text("open-settings", "SETTINGS").on_press(|s: &mut State| s.settings_open = true)));
+            .child(row().key("open-settings-row").gap(10.0).center_y()
+                .child(if no_account { ping("settings-ping") } else { el().key("settings-ping") })
+                .child(link_text("open-settings", l.t("SETTINGS", "AJUSTES")).on_press(|s: &mut State| s.settings_open = true))));
+    // Without an account everything comes from YouTube Music: say so, and offer to sign in.
+    let account_note = if no_account {
+        row().key("no-account").gap(10.0).center_y().cursor(Cursor::Pointer).role("button")
+            .on_press(|s: &mut State| s.login_open = true)
+            .child(ping("no-account-ping"))
+            .child(text(l.t("NOT SIGNED IN TO SOULSEEK · DOWNLOADS COME FROM YOUTUBE MUSIC (SLOWER) · SIGN IN →", "NO INICIASTE SESIÓN EN SOULSEEK · LAS DESCARGAS VIENEN DE YOUTUBE MUSIC (MÁS LENTO) · ENTRÁ →"))
+                .font(mono(12.0, 600.0)).color(red()))
+    } else {
+        el().key("no-account")
+    };
     col().key("idle").w_full().h_full().px(44.0).pt(36.0).pb(14.0).gap(18.0)
-        .child(headline(s, "Paste a Spotify link").grow(1.0).min_h(160.0))
+        .child(headline(s, l.t("Paste a Spotify link", "Pegá un link de Spotify")).grow(1.0).min_h(160.0))
         .child(row().w_full().center().gap(18.0).pt(10.0)
             .child(col().w(field_w).gap(6.0).child(field).child(underline))
             .child(go))
         .child(row().w_full().center().child(text(hint).key("hint").font(mono(12.0, 500.0)).color(hint_color)))
-        .child(el().h(18.0))
+        .child(row().w_full().center().child(account_note))
+        .child(el().h(8.0))
         .child(footer)
 }
 
@@ -171,21 +199,23 @@ fn fmt_size(b: u64) -> String {
 }
 
 fn status(s: &State) -> &'static str {
+    let l = s.lang;
     if s.phase == Phase::Failed {
-        return "FAILED";
+        return l.t("FAILED", "FALLÓ");
     }
     let running = s.tracks.iter().any(|t| t.in_run);
     if !s.tracks.is_empty() && !running && s.asking() > 0 {
-        return "ALREADY IN YOUR FOLDER";
+        return l.t("ALREADY IN YOUR FOLDER", "YA ESTÁ EN TU CARPETA");
     }
     match s.stage.as_str() {
-        "spotify" => "READING SPOTIFY",
-        "soulseek" if s.downloading() => "DOWNLOADING FROM SOULSEEK",
-        "soulseek" => "SEARCHING SOULSEEK",
-        "youtube" => "TRYING YOUTUBE MUSIC",
-        "convert" => "CONVERTING TO MP3",
-        "done" => "FINISHING",
-        _ => "CONNECTING",
+        "spotify" => l.t("READING SPOTIFY", "LEYENDO SPOTIFY"),
+        "soulseek" if s.downloading() => l.t("DOWNLOADING FROM SOULSEEK", "DESCARGANDO DE SOULSEEK"),
+        "soulseek" => l.t("SEARCHING SOULSEEK", "BUSCANDO EN SOULSEEK"),
+        "youtube" if s.downloading() => l.t("DOWNLOADING FROM YOUTUBE MUSIC", "DESCARGANDO DE YOUTUBE MUSIC"),
+        "youtube" => l.t("SEARCHING YOUTUBE MUSIC", "BUSCANDO EN YOUTUBE MUSIC"),
+        "convert" => l.t("CONVERTING TO MP3", "CONVIRTIENDO A MP3"),
+        "done" => l.t("FINISHING", "TERMINANDO"),
+        _ => l.t("CONNECTING", "CONECTANDO"),
     }
 }
 
@@ -197,18 +227,20 @@ fn stat(key: &str, label: &str, value: String) -> El {
 
 /// "FROM ZWEM ⟶", "FROM ZWEM +2 PEERS ⟶".
 fn peer_label(s: &State) -> String {
+    let l = s.lang;
     let peers = s.peers();
     match peers.len() {
-        0 if s.stage == "convert" => format!("CONVERTING {}/{}", s.convert.0, s.convert.1),
-        0 => "WAITING FOR PEERS".into(),
-        1 => format!("FROM {} ⟶", peers[0].to_uppercase()),
-        n => format!("FROM {} +{} PEERS ⟶", peers[0].to_uppercase(), n - 1),
+        0 if s.stage == "convert" => format!("{} {}/{}", l.t("CONVERTING", "CONVIRTIENDO"), s.convert.0, s.convert.1),
+        0 => l.t("WAITING FOR PEERS", "ESPERANDO USUARIOS").into(),
+        1 => format!("{} {} ⟶", l.t("FROM", "DE"), peers[0].to_uppercase()),
+        n => format!("{} {} +{} {} ⟶", l.t("FROM", "DE"), peers[0].to_uppercase(), n - 1, l.t("PEERS", "USUARIOS")),
     }
 }
 
 fn working(s: &State, size: [f32; 2]) -> El {
+    let l = s.lang;
     let n = s.tracks.len();
-    let coll = if n == 0 { "…".to_string() } else { format!("{}: {} · {} TRACKS", s.kind.to_uppercase(), s.name.to_uppercase(), n) };
+    let coll = if n == 0 { "…".to_string() } else { format!("{}: {} · {}", l.kind(&s.kind), s.name.to_uppercase(), l.tracks(n)) };
     let header = row().key("header").w_full().h(68.0).px(24.0).center_y().justify_between()
         .child(col().gap(4.0).shrink().min_w(0.0)
             .child(row().gap(8.0).center_y()
@@ -216,11 +248,11 @@ fn working(s: &State, size: [f32; 2]) -> El {
                 .child(text(status(s)).key("status").font(mono(15.0, 600.0)).color(ink())))
             .child(text(s.running_link.clone()).font(mono(12.0, 400.0)).color(muted()).truncate()))
         .child(row().center_y()
-            .child(stat("stat-coll", "COLLECTION", coll))
+            .child(stat("stat-coll", l.t("COLLECTION", "COLECCIÓN"), coll))
             .child(el().w(2.0).h(34.0).fill(ink()))
-            .child(stat("stat-progress", "PROGRESS", format!("{}/{}", s.finished(), n)))
+            .child(stat("stat-progress", l.t("PROGRESS", "PROGRESO"), format!("{}/{}", s.finished(), n)))
             .child(el().w(2.0).h(34.0).fill(ink()))
-            .child(stat("stat-speed", "SPEED", fmt_speed(s.speed))));
+            .child(stat("stat-speed", l.t("SPEED", "VELOCIDAD"), fmt_speed(s.speed))));
     let rule = || el().w_full().h(2.0).fill(ink());
 
     let pct = (s.progress() * 100.0).round() as u32;
@@ -233,16 +265,23 @@ fn working(s: &State, size: [f32; 2]) -> El {
             .child(el().key("bar-fx").effect(gfx::BAR).effect_data(s.bar()).absolute(0.0, 0.0).w_full().h_full().label(format!("{pct} percent"))))
         .child(row().w_full().justify_between()
             .child(text(format!("{pct}%")).key("pct").font(display(30.0)).color(ink()))
-            .child(text(format!("{} DONE · {} LEFT", s.count(TState::Done), left)).font(mono(12.0, 600.0)).color(ink())));
+            .child(text(format!("{} {} · {} {}", s.count(TState::Done), l.t("DONE", "LISTAS"), left, l.t("LEFT", "FALTAN"))).font(mono(12.0, 600.0)).color(ink())));
 
     let mut below = col().key("below").w_full().grow(1.0).min_h(0.0).gap(10.0);
     if s.phase == Phase::Failed {
-        below = below.child(col().key("failed").w_full().gap(16.0).pt(10.0)
-            .child(text(if s.error.is_empty() { "Something went wrong.".into() } else { s.error.clone() }).font(mono(13.0, 500.0)).color(red()).wrap())
+        let mut failed = col().key("failed").w_full().gap(16.0).pt(10.0);
+        if let Some(h) = i18n::hint(l, &s.error) {
+            failed = failed.child(text(h).key("error-hint").font(mono(15.0, 600.0)).color(ink()).wrap());
+        }
+        below = below.child(failed
+            .child(text(if s.error.is_empty() { l.t("Something went wrong.", "Algo salió mal.").into() } else { s.error.clone() }).font(mono(13.0, 500.0)).color(red()).wrap())
             .child(row().gap(14.0)
-                .child(button("retry", "TRY AGAIN", true).on_press(|s: &mut State| s.start()))
-                .child(button("new-link", "NEW LINK", false).on_press(|s: &mut State| s.new_link()))));
+                .child(button("retry", l.t("TRY AGAIN", "PROBÁ DE NUEVO"), true).on_press(|s: &mut State| s.start()))
+                .child(button("new-link", l.t("NEW DOWNLOAD", "NUEVA DESCARGA"), false).on_press(|s: &mut State| s.new_link()))));
     } else {
+        if s.login_problem || s.account == Account::None {
+            below = below.child(account_banner(s));
+        }
         if s.asking() > 0 {
             below = below.child(ask_banner(s));
         }
@@ -253,7 +292,7 @@ fn working(s: &State, size: [f32; 2]) -> El {
         .child(row().key("stop").gap(8.0).center_y().cursor(Cursor::Pointer).role("button").label("Stop")
             .on_press(|s: &mut State| if s.phase == Phase::Running { s.stop() } else { s.new_link() })
             .child(el().size(16.0, 16.0).radius(8.0).border(2.0, ink()))
-            .child(text(if s.phase == Phase::Running { "STOP" } else { "BACK" }).font(mono(13.0, 600.0)).color(ink())))
+            .child(text(if s.phase == Phase::Running { l.t("STOP", "FRENAR") } else { l.t("BACK", "VOLVER") }).font(mono(13.0, 600.0)).color(ink())))
         .child(text(s.last_log.clone()).key("log").font(mono(11.0, 400.0)).color(muted()).truncate().grow(1.0).min_w(0.0))
         .child(text("SPOTSEEK").font(mono(13.0, 600.0)).color(ink()));
 
@@ -271,14 +310,20 @@ fn working(s: &State, size: [f32; 2]) -> El {
 
 /// "You already have these": the answer for all of them, and the countdown to "skip".
 fn ask_banner(s: &State) -> El {
+    let l = s.lang;
     let n = s.asking();
-    let what = if n == 1 { "1 TRACK IS".to_string() } else { format!("{n} TRACKS ARE") };
-    let mut msg = format!("{what} ALREADY IN {}", s.settings.short_dir().to_uppercase());
+    let dir = s.settings.short_dir().to_uppercase();
+    let mut msg = match (l, n) {
+        (Lang::En, 1) => format!("1 TRACK IS ALREADY IN {dir}"),
+        (Lang::En, n) => format!("{n} TRACKS ARE ALREADY IN {dir}"),
+        (Lang::Es, 1) => format!("1 CANCIÓN YA ESTÁ EN {dir}"),
+        (Lang::Es, n) => format!("{n} CANCIONES YA ESTÁN EN {dir}"),
+    };
     let left = s.countdown_left();
-    if let Some(l) = left {
-        msg += &format!(" · SKIPPING IN {}", l.ceil() as u32);
+    if let Some(secs) = left {
+        msg += &format!(" · {} {}", l.t("SKIPPING IN", "SE SALTEAN EN"), secs.ceil() as u32);
     } else {
-        msg += " · THEY ARE SKIPPED WHEN THE REST IS DONE";
+        msg += l.t(" · THEY ARE SKIPPED WHEN THE REST IS DONE", " · SE SALTEAN CUANDO TERMINE EL RESTO");
     }
     let frac = s.countdown.map_or(1.0, |(l, len)| (l.max(0.0) / len) as f32);
     let small = |key: &str, label: &str, dark: bool| {
@@ -291,10 +336,26 @@ fn ask_banner(s: &State) -> El {
         .transition(Transition::offset(0.0, -10.0).combined(Transition::opacity()))
         .child(row().w_full().h(46.0).px(14.0).gap(12.0).center_y()
             .child(text(msg).key("ask-msg").font(mono(13.0, 600.0)).color(ink()).truncate().grow(1.0).min_w(0.0))
-            .child(small("ask-again", "DOWNLOAD AGAIN", false).on_press(|s: &mut State| s.decide_all(true)))
-            .child(small("ask-skip", "SKIP", true).on_press(|s: &mut State| s.decide_all(false))))
+            .child(small("ask-again", l.t("DOWNLOAD AGAIN", "DESCARGAR DE NUEVO"), false).on_press(|s: &mut State| s.decide_all(true)))
+            .child(small("ask-skip", l.t("SKIP", "SALTEAR"), true).on_press(|s: &mut State| s.decide_all(false))))
         // The time left, as a bar that runs out.
         .child(el().key("ask-time").h(4.0).w_frac(frac).fill(ink()).motion(Spring::new(0.15, 0.0)))
+}
+
+/// No Soulseek account, or Sockseek could not sign in: everything comes from YouTube Music.
+fn account_banner(s: &State) -> El {
+    let l = s.lang;
+    let msg = if s.login_problem {
+        l.t("SOULSEEK COULD NOT SIGN IN · USING YOUTUBE MUSIC · CHECK YOUR ACCOUNT", "SOULSEEK NO PUDO INICIAR SESIÓN · SE USA YOUTUBE MUSIC · REVISÁ TU CUENTA")
+    } else {
+        l.t("NO SOULSEEK ACCOUNT · EVERYTHING COMES FROM YOUTUBE MUSIC (SLOWER)", "SIN CUENTA DE SOULSEEK · TODO VIENE DE YOUTUBE MUSIC (MÁS LENTO)")
+    };
+    row().key("account-banner").w_full().h(40.0).px(14.0).gap(12.0).center_y().border(2.0, red())
+        .child(ping("account-banner-ping"))
+        .child(text(msg).font(mono(12.0, 600.0)).color(red()).truncate().grow(1.0).min_w(0.0))
+        .child(row().key("account-banner-go").h(28.0).px(10.0).center().fill(red()).cursor(Cursor::Pointer).role("button")
+            .on_press(|s: &mut State| s.settings_open = true)
+            .child(text(l.t("ACCOUNT", "CUENTA")).font(mono(12.0, 600.0)).color(paper())))
 }
 
 /// Tracks in rows, left to right. Under each row is a band that opens to show the details of
@@ -303,7 +364,7 @@ fn track_grid(s: &State, width: f32) -> El {
     let n = s.tracks.len();
     if n == 0 {
         return col().key("tracks").w_full().grow(1.0).center()
-            .child(text("READING THE TRACK LIST…").font(mono(13.0, 600.0)).color(muted()).cycle(BLINK));
+            .child(text(s.lang.t("READING THE TRACK LIST…", "LEYENDO LA LISTA…")).font(mono(13.0, 600.0)).color(muted()).cycle(BLINK));
     }
     let cols = ((width / 250.0).floor() as usize).clamp(1, 6);
     let cw = width / cols as f32;
@@ -316,7 +377,7 @@ fn track_grid(s: &State, width: f32) -> El {
             if s.open.as_deref() == Some(key.as_str()) {
                 open = Some(key);
             }
-            line = line.child(el().key(format!("slot-{i}")).w(cw).pr(10.0).child(cell(i, &s.tracks[i], s.open.as_deref() == Some(format!("c{i}").as_str()))));
+            line = line.child(el().key(format!("slot-{i}")).w(cw).pr(10.0).child(cell(s.lang, i, &s.tracks[i], s.open.as_deref() == Some(format!("c{i}").as_str()))));
         }
         grid = grid.child(line).child(band(s, format!("band-{r}"), open, width - 10.0));
     }
@@ -335,7 +396,7 @@ fn open_on_press(key: String) -> impl Fn(&mut State, &mut Tx) + 'static {
     }
 }
 
-fn cell(i: usize, t: &Track, open: bool) -> El {
+fn cell(l: Lang, i: usize, t: &Track, open: bool) -> El {
     let title = t.title.to_uppercase();
     let (bg, fg, chip): (Color, Color, String) = match t.state {
         TState::Pending => (Color::TRANSPARENT, muted(), String::new()),
@@ -345,12 +406,12 @@ fn cell(i: usize, t: &Track, open: bool) -> El {
             (ink(), paper(), format!("{:.0}%", p * 100.0))
         }
         TState::Done => (stripe(i), ink(), if t.youtube { "YT".into() } else { "OK".into() }),
-        TState::Failed => (Color::TRANSPARENT, ink(), "TRYING YT…".into()),
+        TState::Failed => (Color::TRANSPARENT, ink(), l.t("TRYING YT…", "PROBANDO YT…").into()),
         TState::YtSearch | TState::YtDownload => (yellow(), ink(), "→ YT".into()),
-        TState::Missing => (Color::TRANSPARENT, muted(), "MISSING".into()),
+        TState::Missing => (Color::TRANSPARENT, muted(), l.t("MISSING", "FALTA").into()),
         TState::Have => (Color::TRANSPARENT, ink(), String::new()),
-        TState::Queued => (Color::TRANSPARENT, ink(), "AGAIN ↓".into()),
-        TState::Skipped => (Color::TRANSPARENT, muted(), "HAD IT".into()),
+        TState::Queued => (Color::TRANSPARENT, ink(), l.t("AGAIN ↓", "DE NUEVO ↓").into()),
+        TState::Skipped => (Color::TRANSPARENT, muted(), l.t("HAD IT", "YA ESTABA").into()),
     };
     let mut label = text(title.clone()).font(mono(12.5, 600.0)).color(fg).truncate().grow(1.0).min_w(0.0);
     if t.state == TState::Missing {
@@ -384,8 +445,8 @@ fn cell(i: usize, t: &Track, open: bool) -> El {
                 .hover(red())
                 .child(text(label).font(mono(10.0, 600.0)).color(fg))
         };
-        r = r.child(mini("again", "AGAIN", false).on_press(move |s: &mut State| s.decide(i, true)))
-            .child(mini("skip", "SKIP", true).on_press(move |s: &mut State| s.decide(i, false)));
+        r = r.child(mini("again", l.t("AGAIN", "DE NUEVO"), false).on_press(move |s: &mut State| s.decide(i, true)))
+            .child(mini("skip", l.t("SKIP", "SALTEAR"), true).on_press(move |s: &mut State| s.decide(i, false)));
     }
     r
 }
@@ -405,6 +466,7 @@ fn band(s: &State, key: String, open: Option<String>, width: f32) -> El {
 }
 
 fn detail_panel(s: &State, key: &str, d: &Detail, width: f32) -> El {
+    let l = s.lang;
     let light = paper().alpha(0.55);
 
     // The cover, or a block in the stripe colour with the first letter.
@@ -433,14 +495,14 @@ fn detail_panel(s: &State, key: &str, d: &Detail, width: f32) -> El {
         "youtube" => "YOUTUBE MUSIC",
         _ => "",
     };
-    fact("SOURCE", source.into());
+    fact(l.t("SOURCE", "FUENTE"), source.into());
     if d.source == "soulseek" {
-        fact("FROM", d.peer.to_uppercase());
+        fact(l.t("FROM", "DE"), d.peer.to_uppercase());
     }
-    fact("QUALITY", if d.bitrate > 0 { format!("{} KBPS", d.bitrate) } else { String::new() });
-    fact("SIZE", if d.size > 0 { fmt_size(d.size) } else { String::new() });
-    fact("AVG SPEED", if d.speed() > 0.0 { fmt_speed(d.speed() as f32) } else { String::new() });
-    fact("TOOK", if d.took() > 0.0 { clock(d.took()) } else { String::new() });
+    fact(l.t("QUALITY", "CALIDAD"), if d.bitrate > 0 { format!("{} KBPS", d.bitrate) } else { String::new() });
+    fact(l.t("SIZE", "TAMAÑO"), if d.size > 0 { fmt_size(d.size) } else { String::new() });
+    fact(l.t("AVG SPEED", "VEL. MEDIA"), if d.speed() > 0.0 { fmt_speed(d.speed() as f32) } else { String::new() });
+    fact(l.t("TOOK", "TARDÓ"), if d.took() > 0.0 { clock(d.took()) } else { String::new() });
     let mut facts = row().key("facts").gap(26.0).flex_wrap();
     for f in fact_list {
         facts = facts.child(f);
@@ -449,25 +511,29 @@ fn detail_panel(s: &State, key: &str, d: &Detail, width: f32) -> El {
     let sub = [d.artist.clone(), d.album.clone()].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · ");
     let title_row = row().key("title-row").w_full().gap(14.0).center_y()
         .child(text(d.title.to_uppercase()).font(display(40.0)).color(paper()).truncate().shrink().min_w(0.0))
-        .child(row().px(8.0).py(3.0).fill(if d.moved || d.status == "NOT FOUND" { red() } else { yellow() })
+        .child(row().px(8.0).py(3.0).fill(if d.bad { red() } else { yellow() })
             .child(text(d.status.clone()).font(mono(11.0, 600.0)).color(ink())));
 
     let mut links = row().key("links").gap(22.0);
     if !d.path.is_empty() && !d.path.starts_with("demo://") {
         let p = d.path.clone();
-        links = links.child(text("SHOW IN FOLDER ↗").key("reveal").font(mono(12.0, 600.0)).color(paper()).cursor(Cursor::Pointer).role("link")
+        links = links.child(text(l.t("SHOW IN FOLDER ↗", "MOSTRAR EN LA CARPETA ↗")).key("reveal").font(mono(12.0, 600.0)).color(paper()).cursor(Cursor::Pointer).role("link")
             .on_press(move |_: &mut State| reveal(&p)));
     }
     if !d.url.is_empty() {
         let u = d.url.clone();
-        links = links.child(text("OPEN ON YOUTUBE ↗").key("yt").font(mono(12.0, 600.0)).color(paper()).cursor(Cursor::Pointer).role("link")
+        links = links.child(text(l.t("OPEN ON YOUTUBE ↗", "ABRIR EN YOUTUBE ↗")).key("yt").font(mono(12.0, 600.0)).color(paper()).cursor(Cursor::Pointer).role("link")
             .on_press_tx(move |_: &mut State, tx: &mut Tx| {
                 let _ = tx.open_url(&u);
             }));
     }
 
     let player_el = if d.path.is_empty() {
-        text(if d.moved { "THE FILE IS NOT IN THE FOLDER ANY MORE." } else { "THE PLAYER SHOWS UP WHEN THE TRACK IS DOWNLOADED." }).key("no-player").font(mono(12.0, 500.0)).color(light)
+        text(if d.moved {
+            l.t("THE FILE IS NOT IN THE FOLDER ANY MORE.", "EL ARCHIVO YA NO ESTÁ EN LA CARPETA.")
+        } else {
+            l.t("THE PLAYER SHOWS UP WHEN THE TRACK IS DOWNLOADED.", "EL REPRODUCTOR APARECE CUANDO LA CANCIÓN SE DESCARGA.")
+        }).key("no-player").font(mono(12.0, 500.0)).color(light)
     } else {
         player(s, &d.path, d.duration as f64, width)
     };
@@ -532,7 +598,7 @@ fn player(s: &State, path: &str, spotify: f64, _width: f32) -> El {
                 bars = bars.child(el().key(format!("b{k}")).grow(1.0).h(4.0 + v * 46.0).radius(1.0).fill(if on { red() } else { paper().alpha(0.4) }));
             }
         }
-        Wave::Loading => bars = bars.child(text("READING THE WAVEFORM…").font(mono(11.0, 500.0)).color(paper().alpha(0.5)).cycle(BLINK)),
+        Wave::Loading => bars = bars.child(text(s.lang.t("READING THE WAVEFORM…", "LEYENDO LA ONDA…")).font(mono(11.0, 500.0)).color(paper().alpha(0.5)).cycle(BLINK)),
         Wave::Failed => bars = bars.child(el().grow(1.0).h(2.0).fill(paper().alpha(0.4))),
     }
     let p = path.to_string();
@@ -585,6 +651,7 @@ pub fn reveal(path: &str) {
 // ------------------------------------------------------------------ 3. poster and history
 
 fn poster(s: &State, size: [f32; 2]) -> El {
+    let l = s.lang;
     let n = s.tracks.len().max(1);
     let has_history = s.history.sessions.iter().any(|h| h.id != s.session_id);
     // With a history, leave room to see where it starts.
@@ -623,10 +690,10 @@ fn poster(s: &State, size: [f32; 2]) -> El {
             row_el = row_el.child(tag("YT"));
         }
         if had {
-            row_el = row_el.child(tag("ALREADY HAD"));
+            row_el = row_el.child(tag(l.t("ALREADY HAD", "YA ESTABA")));
         }
         if missing {
-            row_el = row_el.child(text("NOT FOUND").font(mono((fs * 0.35).clamp(10.0, 16.0), 600.0)).color(ink()));
+            row_el = row_el.child(text(l.t("NOT FOUND", "NO ENCONTRADA")).font(mono((fs * 0.35).clamp(10.0, 16.0), 600.0)).color(ink()));
         }
         let open = (s.open.as_deref() == Some(key.as_str())).then_some(key);
         stripes = stripes.child(row_el).child(band(s, format!("pband-{i}"), open, size[0]));
@@ -635,24 +702,24 @@ fn poster(s: &State, size: [f32; 2]) -> El {
     let yt = s.tracks.iter().filter(|t| t.youtube && t.state == TState::Done).count();
     let missing = s.count(TState::Missing);
     let had = s.count(TState::Skipped);
-    let mut stats = format!("{} TRACKS", s.count(TState::Done));
+    let mut stats = l.tracks(s.count(TState::Done));
     if mb > 0.0 {
-        stats += &format!(" · {mb:.0} MB FROM SOULSEEK");
+        stats += &format!(" · {mb:.0} MB {}", l.t("FROM SOULSEEK", "DE SOULSEEK"));
     }
     if yt > 0 {
-        stats += &format!(" · {yt} FROM YOUTUBE");
+        stats += &format!(" · {yt} {}", l.t("FROM YOUTUBE", "DE YOUTUBE"));
     }
     if had > 0 {
-        stats += &format!(" · {had} ALREADY HAD");
+        stats += &format!(" · {had} {}", l.t("ALREADY HAD", "YA ESTABAN"));
     }
     if missing > 0 {
-        stats += &format!(" · {missing} MISSING");
+        stats += &format!(" · {missing} {}", l.t("MISSING", "FALTAN"));
     }
     let top = row().key("poster-top").w_full().h(54.0).px(24.0).center_y().justify_between()
-        .child(text(format!("DONE. {}", s.name.to_uppercase())).font(mono(15.0, 600.0)).color(ink()).truncate().shrink().min_w(0.0))
-        .child(link_text("new-link", "NEW LINK →").on_press(|s: &mut State| s.new_link()));
+        .child(text(format!("{} {}", l.t("DONE.", "LISTO."), s.name.to_uppercase())).font(mono(15.0, 600.0)).color(ink()).truncate().shrink().min_w(0.0))
+        .child(link_text("new-link", l.t("NEW DOWNLOAD →", "NUEVA DESCARGA →")).on_press(|s: &mut State| s.new_link()));
     let bottom = row().key("poster-bottom").w_full().h(70.0).px(24.0).gap(20.0).center()
-        .child(button("open-folder", "OPEN FOLDER →", true).on_press(|s: &mut State| open_folder(if s.out_dir.is_empty() { &s.settings.dir } else { &s.out_dir })))
+        .child(button("open-folder", l.t("OPEN FOLDER →", "ABRIR CARPETA →"), true).on_press(|s: &mut State| open_folder(if s.out_dir.is_empty() { &s.settings.dir } else { &s.out_dir })))
         .child(text(stats).key("stats").font(mono(13.0, 600.0)).color(ink()));
     let mut list = col().key("poster-list").w_full().child(stripes);
     if has_history {
@@ -666,15 +733,16 @@ fn poster(s: &State, size: [f32; 2]) -> El {
 
 /// The history screen, from the paste screen.
 fn history_screen(s: &State, size: [f32; 2]) -> El {
+    let l = s.lang;
     let n: usize = s.history.sessions.iter().map(|h| h.tracks.iter().filter(|t| t.state == "done").count()).sum();
     let top = row().key("history-top").w_full().h(54.0).px(24.0).center_y().justify_between()
-        .child(text(format!("HISTORY · {n} TRACKS")).font(mono(15.0, 600.0)).color(ink()))
-        .child(link_text("history-back", "← BACK").on_press(|s: &mut State| {
+        .child(text(format!("{} · {}", l.t("HISTORY", "HISTORIAL"), l.tracks(n))).font(mono(15.0, 600.0)).color(ink()))
+        .child(link_text("history-back", l.t("← BACK", "← VOLVER")).on_press(|s: &mut State| {
             s.show_history = false;
             s.open = None;
         }));
     let body = if s.history.sessions.is_empty() {
-        col().w_full().grow(1.0).center().child(text("NOTHING DOWNLOADED YET").font(mono(13.0, 600.0)).color(muted()))
+        col().w_full().grow(1.0).center().child(text(l.t("NOTHING DOWNLOADED YET", "TODAVÍA NO DESCARGASTE NADA")).font(mono(13.0, 600.0)).color(muted()))
     } else {
         col().w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(history_list(s, "", size[0]))
     };
@@ -682,28 +750,28 @@ fn history_screen(s: &State, size: [f32; 2]) -> El {
 }
 
 /// "7 NOV 2026".
-fn date(unix: f64) -> String {
-    const M: [&str; 12] = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+fn date(l: Lang, unix: f64) -> String {
     let (y, m, d) = crate::model::civil((unix as i64).div_euclid(86_400));
-    format!("{d} {} {y}", M[(m as usize).saturating_sub(1).min(11)])
+    format!("{d} {} {y}", l.month(m))
 }
 
 /// Every earlier session but `except`: a divider, then each session's tracks.
 fn history_list(s: &State, except: &str, width: f32) -> El {
+    let l = s.lang;
     let mut list = col().key("history-list").w_full().pt(26.0).pb(20.0);
     if !except.is_empty() {
         list = list.child(row().key("divider").w_full().px(24.0).pb(18.0).gap(14.0).center_y()
             .child(el().h(2.0).grow(1.0).fill(ink()))
-            .child(text("HISTORY").font(display(30.0)).color(ink()))
+            .child(text(l.t("HISTORY", "HISTORIAL")).font(display(30.0)).color(ink()))
             .child(el().h(2.0).grow(1.0).fill(ink())));
     }
     for sess in s.history.sessions.iter().filter(|h| h.id != except) {
         let done = sess.tracks.iter().filter(|t| t.state == "done").count();
         list = list.child(row().key(format!("sess-{}", sess.id)).w_full().h(40.0).px(24.0).gap(12.0).center_y()
             .child(text(sess.name.to_uppercase()).font(mono(14.0, 600.0)).color(ink()).truncate().shrink().min_w(0.0))
-            .child(text(format!("{} · {} · {done}/{} TRACKS", sess.kind.to_uppercase(), date(sess.started), sess.tracks.len())).font(mono(11.0, 600.0)).color(muted()))
+            .child(text(format!("{} · {} · {done}/{}", l.kind(&sess.kind), date(l, sess.started), l.tracks(sess.tracks.len()))).font(mono(11.0, 600.0)).color(muted()))
             .child(el().grow(1.0))
-            .child(link_text(&format!("folder-{}", sess.id), "FOLDER ↗").on_press({
+            .child(link_text(&format!("folder-{}", sess.id), l.t("FOLDER ↗", "CARPETA ↗")).on_press({
                 let dir = sess.dir.clone();
                 move |_: &mut State| open_folder(&dir)
             })));
@@ -715,7 +783,15 @@ fn history_list(s: &State, except: &str, width: f32) -> El {
             if t.state != "done" {
                 label = label.strike(0, title.len(), Some(muted()));
             }
-            let note = if t.state != "done" { "NOT FOUND" } else if gone { "FILE MOVED" } else if t.source == "youtube" { "YT" } else { "" };
+            let note = if t.state != "done" {
+                l.t("NOT FOUND", "NO ENCONTRADA")
+            } else if gone {
+                l.t("FILE MOVED", "SE MOVIÓ")
+            } else if t.source == "youtube" {
+                "YT"
+            } else {
+                ""
+            };
             let open = s.open.as_deref() == Some(key.as_str());
             let mut r = row().key(format!("hrow-{key}")).w_full().h(30.0).px(24.0).gap(12.0).center_y()
                 .cursor(Cursor::Pointer).role("button").label(format!("{} details", t.title))
@@ -745,48 +821,122 @@ pub fn open_folder(path: &str) {
 // ------------------------------------------------------------------ settings
 
 fn settings_panel(s: &State) -> El {
+    let l = s.lang;
     let label = |t: &str| text(t.to_string()).font(mono(11.0, 600.0)).color(muted());
     let field = |key: &str, edit: &rune::TextEdit| text_input(edit, mono(15.0, 500.0)).key(key).single_line().w_full().color(ink()).caret(ink(), red().alpha(0.25));
     let boxed = |e: El| row().w_full().h(42.0).px(12.0).center_y().border(2.0, ink()).fill(Color::WHITE).child(e);
+    let choice = |key: String, label: &str, on: bool| {
+        row().key(key).h(40.0).px(14.0).center().border(2.0, ink()).cursor(Cursor::Pointer)
+            .fill(if on { ink() } else { Color::TRANSPARENT })
+            .child(text(label.to_string()).font(mono(14.0, 600.0)).color(if on { paper() } else { ink() }))
+    };
     let mut quality = row().gap(0.0);
     for b in ["320", "256", "192", "128"] {
-        let on = s.settings.bitrate == b;
-        quality = quality.child(row().key(format!("q{b}")).h(40.0).w(70.0).center().border(2.0, ink()).cursor(Cursor::Pointer)
-            .fill(if on { ink() } else { Color::TRANSPARENT })
-            .on_press(move |s: &mut State| s.settings.bitrate = b.into())
-            .child(text(b).font(mono(14.0, 600.0)).color(if on { paper() } else { ink() })));
+        quality = quality.child(choice(format!("q{b}"), b, s.settings.bitrate == b).w(70.0).on_press(move |s: &mut State| s.settings.bitrate = b.into()));
+    }
+    let mut lang = row().gap(0.0);
+    for (k, name) in [("auto", l.t("SYSTEM", "SISTEMA")), ("en", "ENGLISH"), ("es", "ESPAÑOL")] {
+        lang = lang.child(choice(format!("lang-{k}"), name, s.settings.lang == k).on_press(move |s: &mut State| s.set_lang(k)));
     }
     let fb = s.settings.fallback;
-    let panel = col().key("settings").w(560.0).padding(28.0).gap(12.0).fill(paper()).border(3.0, ink())
+    let panel = col().key("settings").w(600.0).padding(28.0).gap(12.0).fill(paper()).border(3.0, ink())
         .shadow(18.0, 0.0, ink())
         .on_press(|_: &mut State| {})
-        .child(text("SETTINGS").font(display(54.0)).color(ink()))
-        .child(label("EXPORT FOLDER"))
+        .child(text(l.t("SETTINGS", "AJUSTES")).font(display(54.0)).color(ink()))
+        .child(row().key("account-title").gap(10.0).center_y()
+            .child(label(l.t("SOULSEEK ACCOUNT", "CUENTA DE SOULSEEK")))
+            .child(if s.account == Account::None { ping("account-ping") } else { el().key("account-ping") }))
+        .child(login_form(s))
+        .child(label(l.t("DOWNLOAD FOLDER", "CARPETA DE DESCARGAS")))
         .child(row().w_full().gap(10.0)
-            .child(boxed(field("dir", &s.dir_edit).on_edit(|s: &mut State| &mut s.dir_edit)).shrink().grow(1.0).min_w(0.0))
-            .child(button("choose-dir", "CHOOSE…", false).on_press_tx(|s: &mut State, tx: &mut Tx| {
-                let options = FileDialogOptions { title: "Export folder".into(), directory: Some(s.settings.dir.clone().into()), ..Default::default() };
+            .child(boxed(field("dir", &s.dir_edit).on_edit(|s: &mut State| &mut s.dir_edit).on_submit(|s: &mut State, _: &mut Tx| s.close_settings())).shrink().grow(1.0).min_w(0.0))
+            .child(button("choose-dir", l.t("CHOOSE…", "ELEGIR…"), false).on_press_tx(|s: &mut State, tx: &mut Tx| {
+                let options = FileDialogOptions { title: s.lang.t("Download folder", "Carpeta de descargas").into(), directory: Some(s.settings.dir.clone().into()), ..Default::default() };
                 tx.open_folder(options, |s: &mut State, result, _| {
                     if let Ok(Some(p)) = result {
                         s.dir_edit.replace_text(p.to_string_lossy().into_owned());
                     }
                 });
             })))
-        .child(label("MP3 QUALITY (KBPS)"))
-        .child(quality)
-        .child(label("WHEN SOULSEEK CANNOT FIND A TRACK"))
+        .child(row().w_full().gap(28.0)
+            .child(col().gap(8.0).child(label(l.t("MP3 QUALITY (KBPS)", "CALIDAD DEL MP3 (KBPS)"))).child(quality))
+            .child(col().gap(8.0).child(label(l.t("LANGUAGE", "IDIOMA"))).child(lang)))
+        .child(label(l.t("WHEN SOULSEEK CANNOT FIND A TRACK", "SI SOULSEEK NO ENCUENTRA UNA CANCIÓN")))
         .child(row().key("fallback").gap(10.0).center_y().cursor(Cursor::Pointer).on_press(|s: &mut State| s.settings.fallback = !s.settings.fallback)
             .child(row().size(22.0, 22.0).center().border(2.0, ink()).fill(if fb { ink() } else { Color::TRANSPARENT })
                 .child(text(if fb { "✓" } else { "" }).font(mono(13.0, 600.0)).color(paper())))
-            .child(text("TRY YOUTUBE MUSIC").font(mono(14.0, 600.0)).color(ink())))
-        .child(label("SOULSEEK ACCOUNT (EMPTY: USE ~/.config/sockseek/sockseek.conf)"))
-        .child(row().w_full().gap(10.0)
-            .child(boxed(field("user", &s.user_edit).placeholder("username", muted()).on_edit(|s: &mut State| &mut s.user_edit)).grow(1.0).min_w(0.0))
-            .child(boxed(field("pass", &s.pass_edit).secure().placeholder("password (not saved)", muted()).on_edit(|s: &mut State| &mut s.pass_edit)).grow(1.0).min_w(0.0)))
+            .child(text(l.t("TRY YOUTUBE MUSIC", "PROBAR CON YOUTUBE MUSIC")).font(mono(14.0, 600.0)).color(ink())))
         .child(el().h(6.0))
-        .child(row().w_full().justify_end().child(button("save-settings", "DONE", true).on_press(|s: &mut State| s.close_settings())));
+        .child(row().w_full().justify_between().center_y()
+            .child(text(l.t("ENTER SAVES · ESC CLOSES", "ENTER GUARDA · ESC CIERRA")).font(mono(11.0, 500.0)).color(muted()))
+            .child(button("save-settings", l.t("DONE", "LISTO"), true).on_press(|s: &mut State| s.close_settings())));
     col().key("settings-layer").absolute(0.0, 0.0).w_full().h_full().center()
         .child(el().key("scrim").absolute(0.0, 0.0).w_full().h_full().fill(ink().alpha(0.35)).on_press(|s: &mut State| s.close_settings()))
+        .child(panel)
+        .transition(Transition::opacity())
+}
+
+/// The Soulseek account: who is signed in, or the form to sign in (which also creates the
+/// account, as Soulseek has no sign-up page).
+fn login_form(s: &State) -> El {
+    let l = s.lang;
+    match &s.account {
+        Account::App(name, _) => {
+            return row().key("signed-in").w_full().h(42.0).gap(12.0).center_y()
+                .child(el().size(10.0, 10.0).radius(5.0).fill(c("#2e9e4f")))
+                .child(text(format!("{} {}", l.t("SIGNED IN AS", "SESIÓN INICIADA COMO"), name.to_uppercase())).font(mono(14.0, 600.0)).color(ink()).grow(1.0))
+                .child(link_text("sign-out", l.t("SIGN OUT", "CERRAR SESIÓN")).on_press(|s: &mut State| s.sign_out()));
+        }
+        Account::Conf(name) => {
+            return col().key("signed-in").w_full().gap(4.0)
+                .child(row().gap(12.0).center_y()
+                    .child(el().size(10.0, 10.0).radius(5.0).fill(c("#2e9e4f")))
+                    .child(text(format!("{} {}", l.t("USING THE ACCOUNT IN sockseek.conf:", "USANDO LA CUENTA DE sockseek.conf:"), name.to_uppercase())).font(mono(14.0, 600.0)).color(ink())));
+        }
+        Account::None => {}
+    }
+    let field = |key: &str, edit: &rune::TextEdit| {
+        text_input(edit, mono(15.0, 500.0)).key(key).single_line().w_full().color(ink()).caret(ink(), red().alpha(0.25))
+            .on_submit(|s: &mut State, _: &mut Tx| s.sign_in())
+    };
+    let boxed = |e: El| row().w_full().h(42.0).px(12.0).center_y().border(2.0, ink()).fill(Color::WHITE).child(e);
+    let mut f = col().key("login-form").w_full().gap(10.0)
+        .child(text(l.t(
+            "Soulseek is a free network where people share music. Spotseek downloads from it with your account. No account yet? Pick a name and a password here: if the name is free, the account is created.",
+            "Soulseek es una red gratis donde la gente comparte música. Spotseek descarga de ahí con tu cuenta. ¿Todavía no tenés? Elegí un nombre y una contraseña acá: si el nombre está libre, la cuenta se crea.",
+        )).key("login-about").font(mono(12.0, 500.0)).color(ink()).wrap())
+        .child(row().w_full().gap(10.0)
+            .child(boxed(field("login-user", &s.login_user).placeholder(l.t("name", "nombre"), muted()).on_edit(|s: &mut State| &mut s.login_user)).grow(1.0).min_w(0.0))
+            .child(boxed(field("login-pass", &s.login_pass).secure().placeholder(l.t("password", "contraseña"), muted()).on_edit(|s: &mut State| &mut s.login_pass)).grow(1.0).min_w(0.0)));
+    if !s.login_error.is_empty() {
+        f = f.child(text(s.login_error.clone()).key("login-error").font(mono(12.0, 600.0)).color(red()).wrap());
+    }
+    let go = button("sign-in", if s.login_busy { l.t("SIGNING IN…", "ENTRANDO…") } else { l.t("SIGN IN / CREATE", "ENTRAR / CREAR") }, true)
+        .on_press(|s: &mut State| s.sign_in());
+    f.child(row().w_full().gap(14.0).center_y()
+        .child(go)
+        .child(text(l.t("One account works on one computer at a time.", "Una cuenta funciona en una sola computadora a la vez.")).font(mono(11.0, 500.0)).color(muted()).wrap().shrink().min_w(0.0)))
+}
+
+/// The window that asks for the Soulseek account at launch. It can be skipped.
+fn login_window(s: &State) -> El {
+    let l = s.lang;
+    let panel = col().key("login").w(600.0).padding(28.0).gap(14.0).fill(paper()).border(3.0, ink())
+        .shadow(18.0, 0.0, ink())
+        .on_press(|_: &mut State| {})
+        .child(row().gap(16.0).center_y()
+            .child(text("SOULSEEK").font(display(54.0)).color(ink()))
+            .child(if s.account == Account::None { ping("login-ping") } else { el().key("login-ping") }))
+        .child(login_form(s))
+        .child(el().w_full().h(2.0).fill(ink().alpha(0.15)))
+        .child(row().w_full().gap(14.0).center_y()
+            .child(text(l.t(
+                "Without an account everything comes from YouTube Music: slower, and the quality is lower.",
+                "Sin cuenta, todo se baja de YouTube Music: es más lento y la calidad es menor.",
+            )).font(mono(11.0, 500.0)).color(muted()).wrap().shrink().grow(1.0).min_w(0.0))
+            .child(link_text("skip-login", l.t("SKIP →", "SALTEAR →")).on_press(|s: &mut State| s.login_open = false)));
+    col().key("login-layer").absolute(0.0, 0.0).w_full().h_full().center()
+        .child(el().key("login-scrim").absolute(0.0, 0.0).w_full().h_full().fill(ink().alpha(0.35)))
         .child(panel)
         .transition(Transition::opacity())
 }

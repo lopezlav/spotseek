@@ -474,6 +474,11 @@ func runStream(ctx context.Context, o *Options, args ...string) (retErr error) {
 			o.track.handle(line)
 		}
 		o.log("%s", line)
+		// Sockseek cannot sign in: tell the front end, so it can ask for the account.
+		if strings.Contains(line, "Missing Soulseek username") || strings.Contains(line, "Soulseek login failed") ||
+			strings.Contains(line, "Failed to ensure Soulseek connection and login") {
+			o.emit(Event{Ev: "login", Message: line})
+		}
 		if o.AbortSockseekOn != nil && o.AbortSockseekOn(line) {
 			_ = cmd.Process.Kill()
 			_ = cmd.Wait()

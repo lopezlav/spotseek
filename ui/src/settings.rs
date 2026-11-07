@@ -11,7 +11,10 @@ pub struct Settings {
     pub dir: String,
     pub bitrate: String,
     pub fallback: bool,
+    /// The Soulseek user name (the password is in the system's secure store).
     pub user: String,
+    /// "auto" (the system language), "en" or "es".
+    pub lang: String,
 }
 
 pub fn home() -> PathBuf {
@@ -25,6 +28,7 @@ impl Default for Settings {
             bitrate: "320".into(),
             fallback: true,
             user: String::new(),
+            lang: "auto".into(),
         }
     }
 }

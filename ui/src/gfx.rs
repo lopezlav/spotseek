@@ -20,7 +20,9 @@ pub const HEADLINE: u32 = 1;
 pub const BAR: u32 = 2;
 
 /// The headline words, as lines. The index is the `word` in the headline's effect data.
-pub const WORDS: [&[&str]; 7] = [
+pub const WORDS_PER_LANG: usize = 7;
+/// The English words, then the same words in Spanish.
+pub const WORDS: [&[&str]; 14] = [
     &["PASTE A", "SPOTIFY LINK."],
     &["SEARCHING"],
     &["DOWNLOADING"],
@@ -28,6 +30,13 @@ pub const WORDS: [&[&str]; 7] = [
     &["DONE."],
     &["FAILED."],
     &["ALREADY", "DOWNLOADED."],
+    &["PEGÁ UN LINK", "DE SPOTIFY."],
+    &["BUSCANDO"],
+    &["DESCARGANDO"],
+    &["CONVIRTIENDO"],
+    &["LISTO."],
+    &["FALLÓ."],
+    &["YA LO", "TENÉS."],
 ];
 pub const W_PASTE: f32 = 0.0;
 pub const W_SEARCHING: f32 = 1.0;
