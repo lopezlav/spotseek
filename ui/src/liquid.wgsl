@@ -232,16 +232,29 @@ fn bar_d(q: vec2f) -> f32 {
     var d = sd_round_box(vec2f(q.x + slosh * smoothstep(left, front, q.x) - cx, q.y - cy), vec2f(hw, r * 0.92), r * 0.92);
 
     if (on > 0.01) {
-        // The peer: a blob that breathes while it sends.
+        // One blob per peer that sends a file, in a row from the right end. Each breathes on
+        // its own beat; the newest is the biggest.
+        let peers = max(u.a_fit.x, 1.0);
         let pulse = 0.72 + 0.08 * sin(t * 5.3) + 0.05 * sin(t * 11.0);
-        let blob = length(q - src) - r * pulse * on;
-        d = smin(d, blob, r * 0.8);
-        // Drops on their way from the peer to the pool.
+        d = smin(d, length(q - src) - r * pulse * on, r * 0.8);
+        for (var p = 1; p < 4; p++) {
+            let pf = f32(p);
+            let grow = clamp(peers - pf, 0.0, 1.0);
+            if (grow > 0.001) {
+                let c = vec2f(src.x - pf * r * 1.55, cy + sin(t * 2.1 + pf * 2.3) * r * 0.18);
+                let pp = 0.5 + 0.06 * sin(t * (4.1 + pf) + pf);
+                d = smin(d, length(q - c) - r * pp * grow * on, r * 0.6);
+            }
+        }
+        // Drops on their way from the peers to the pool.
+        let np = i32(round(peers));
         for (var k = 0; k < 9; k++) {
             let kf = f32(k);
+            let peer_k = k % max(np, 1);
+            let sx = src.x - f32(peer_k) * r * 1.55;
             let ph = fract(phase + kf / 9.0 + hash11(kf) * 0.05);
             let e = ph * ph;
-            let x = mix(src.x, front, e);
+            let x = mix(sx, front, e);
             let y = cy + sin(ph * PI * 3.0 + kf * 1.7) * r * 0.32;
             let rr = r * (0.26 + 0.2 * hash11(kf + 3.0)) * (1.0 - 0.35 * ph) * on;
             d = smin(d, length(q - vec2f(x, y)) - rr, r * 0.55);

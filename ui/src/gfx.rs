@@ -3,7 +3,7 @@
 //!
 //! The view tells the compositor what it wants through `effect_data`:
 //! - headline: `[word, wobble, glitch, 0]`, where `word` is an index into [`WORDS`];
-//! - bar: `[fill 0..1, speed 0..1, active 0|1, tracks done]`.
+//! - bar: `[fill 0..1, speed 0..1, peers sending 0..4, tracks done]`.
 //! The compositor owns the motion: it morphs to a new word over [`MORPH`] seconds, eases the
 //! wobble and glitch, springs the fill and moves the drops.
 
@@ -20,13 +20,14 @@ pub const HEADLINE: u32 = 1;
 pub const BAR: u32 = 2;
 
 /// The headline words, as lines. The index is the `word` in the headline's effect data.
-pub const WORDS: [&[&str]; 6] = [
+pub const WORDS: [&[&str]; 7] = [
     &["PASTE A", "SPOTIFY LINK."],
     &["SEARCHING"],
     &["DOWNLOADING"],
     &["CONVERTING"],
     &["DONE."],
     &["FAILED."],
+    &["ALREADY", "DOWNLOADED."],
 ];
 pub const W_PASTE: f32 = 0.0;
 pub const W_SEARCHING: f32 = 1.0;
@@ -34,6 +35,7 @@ pub const W_DOWNLOADING: f32 = 2.0;
 pub const W_CONVERTING: f32 = 3.0;
 pub const W_DONE: f32 = 4.0;
 pub const W_FAILED: f32 = 5.0;
+pub const W_HAVE: f32 = 6.0;
 
 /// Seconds a word takes to melt into the next.
 pub const MORPH: f64 = 1.5;
@@ -77,6 +79,8 @@ struct Bar {
     vel: f32,
     phase: f32,
     active: f32,
+    /// Peers sending, eased, so a new blob grows in.
+    peers: f32,
     done: f32,
     splash_t: f64,
     seen: bool,
@@ -265,7 +269,8 @@ impl Gfx {
             if !b.seen {
                 b.seen = true;
                 b.fill = d[0];
-                b.active = d[2];
+                b.active = d[2].min(1.0);
+                b.peers = d[2];
                 b.done = d[3];
             }
             // A slightly bouncy spring toward the fill the view asks for.
@@ -273,7 +278,8 @@ impl Gfx {
             let acc = w * w * (d[0] - b.fill) - 2.0 * z * w * b.vel;
             b.vel += acc * dt;
             b.fill += b.vel * dt;
-            b.active += (d[2] - b.active) * ease(3.0);
+            b.active += (d[2].min(1.0) - b.active) * ease(3.0);
+            b.peers += (d[2] - b.peers) * ease(4.0);
             b.phase = (b.phase + dt * (0.18 + d[1].clamp(0.0, 1.0) * 0.9) * b.active).fract();
             if d[3] > b.done {
                 b.splash_t = t;
@@ -394,7 +400,7 @@ impl Compositor<State> for Gfx {
                 Uniforms {
                     rect,
                     view,
-                    a_fit: [0.0; 4],
+                    a_fit: [bd.peers, 0.0, 0.0, 0.0],
                     b_fit: [0.0; 4],
                     p0: [t as f32 % 1000.0, bd.fill, bd.phase, bd.active],
                     p1: [splash, bd.active, 1.0, bd.done],

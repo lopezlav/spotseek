@@ -19,6 +19,9 @@ ab_glyph = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bytemuck = { version = "1", features = ["derive"] }
+rodio = { version = "0.23.0", default-features = false, features = ["playback", "symphonia-mp3"] }
+id3 = "1.17.2"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects"] }

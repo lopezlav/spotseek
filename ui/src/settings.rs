@@ -29,7 +29,11 @@ impl Default for Settings {
     }
 }
 
-fn path() -> PathBuf {
+/// Spotseek's folder in the user's config folder: settings, history, logs and covers.
+pub fn config_dir() -> PathBuf {
+    if let Some(p) = std::env::var_os("SPOTSEEK_CONFIG_DIR") {
+        return PathBuf::from(p);
+    }
     let base = if cfg!(target_os = "macos") {
         home().join("Library").join("Application Support")
     } else if cfg!(windows) {
@@ -37,7 +41,11 @@ fn path() -> PathBuf {
     } else {
         std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".config"))
     };
-    base.join("Spotseek").join("settings.json")
+    base.join("Spotseek")
+}
+
+fn path() -> PathBuf {
+    config_dir().join("settings.json")
 }
 
 impl Settings {
@@ -51,16 +59,32 @@ impl Settings {
             let _ = std::fs::create_dir_all(dir);
         }
         if let Ok(b) = serde_json::to_vec_pretty(self) {
-            let _ = std::fs::write(p, b);
+            write_atomic(&p, &b);
         }
     }
 
     /// The folder with the home folder shown as `~`.
     pub fn short_dir(&self) -> String {
-        let h = home().to_string_lossy().into_owned();
-        match self.dir.strip_prefix(&h) {
-            Some(rest) if !h.is_empty() => format!("~{rest}"),
-            _ => self.dir.clone(),
-        }
+        short_path(&self.dir)
+    }
+}
+
+/// Writes through a temporary file, so a crash never leaves half a file.
+pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, bytes).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
+/// `path` with the home folder shown as `~`.
+pub fn short_path(path: &str) -> String {
+    let h = home().to_string_lossy().into_owned();
+    match path.strip_prefix(&h) {
+        Some(rest) if !h.is_empty() => format!("~{rest}"),
+        _ => path.to_string(),
     }
 }

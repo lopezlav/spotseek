@@ -83,24 +83,33 @@ pick. Nothing is read from Spotify and no account is needed.
 
 The window is `ui/`, written in Rust with [Rune](https://github.com/anomalyco/rune).
 It does no downloading itself: it runs the Go program as its backend,
-`spotseek-backend --cli <url> -o <dir> --events`. The backend writes one JSON
-event per line (see `internal/pipeline/events.go`) and stops when its stdin
-closes. The window looks for `spotseek-backend` next to its own program; set
+`spotseek-backend --cli <url> -o <dir> --events --ask`. The backend writes one
+JSON event per line (see `internal/pipeline/events.go`) and stops when its stdin
+closes. With `--ask`, it waits after the track list for one stdin line,
+`{"only":[0,2,5]}`, and downloads only those tracks. The window looks for `spotseek-backend` next to its own program; set
 `SPOTSEEK_BACKEND` to use another path.
 
 - The headline and the liquid-metal progress bar are our own shader
   (`ui/src/liquid.wgsl`) at Rune effect slots. The headline words are signed
   distance fields (`ui/src/sdf.rs`), so one word can flow into the next.
-- Settings are in `settings.json` in the user's config folder
-  (`~/Library/Application Support/Spotseek` on macOS, `%APPDATA%\Spotseek` on
-  Windows). The Soulseek password is never saved.
+- Click a track to open its details: cover, source, peer, quality, size,
+  average speed, time, and a player (space plays and pauses).
+- Tracks that are already in the output folder (from the history, or by their
+  mp3 tags) are not downloaded again. The window asks "download again" or
+  "skip" next to each one. With no answer, they are skipped when nothing else
+  is left, after a countdown that only runs while the window has focus.
+- Everything is in the user's config folder (`~/Library/Application
+  Support/Spotseek` on macOS, `%APPDATA%\Spotseek` on Windows):
+  `settings.json`, `history.json` (every download, by link), `covers/`, and
+  `logs/` (each backend run, line by line; the last 40 are kept). The Soulseek
+  password is never saved. `SPOTSEEK_CONFIG_DIR` sets another folder.
 
 Development helpers:
 
 ```bash
 cd ui
 cargo test --release
-# Render one screen headless (scenes: pasted invalid searching downloading done failed settings)
+# Render one screen headless (see --list-scenes: downloading, details, have, history, …)
 cargo run --release -- --snap out.png --scene downloading --size 1100x780 --scale 2
 # A scripted download with no backend and no network, recorded as video
 SPOTSEEK_DEMO=1 cargo run --release -- --script scripts/demo.json --video demo.mp4 --size 1100x780

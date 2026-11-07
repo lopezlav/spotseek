@@ -64,8 +64,13 @@ type Options struct {
 	Preparation     *PreparedTrack
 	// Event, if set, receives structured progress events (see events.go).
 	Event func(Event)
-	logMu sync.Mutex
-	track *tracker
+	// Select, if set, is called after the collection event with the number
+	// of tracks. It returns the indexes to download (nil: all of them), so a
+	// front end can skip tracks the user already has. Events keep the
+	// indexes of the whole collection.
+	Select func(ctx context.Context, n int) ([]int, error)
+	logMu  sync.Mutex
+	track  *tracker
 }
 
 // Result summarizes a finished run.
@@ -144,7 +149,15 @@ func Run(ctx context.Context, o *Options) (result *Result, runErr error) {
 	}()
 	setup := timing.Begin(ctx, "pipeline.setup", "")
 	if o.WorkDir == "" {
-		o.WorkDir = filepath.Join(o.OutputDir, ".work")
+		// Each run gets its own work folder. A shared one made every run
+		// convert (and copy again) all the files of the runs before it.
+		o.WorkDir = filepath.Join(o.OutputDir, ".work", "run-"+time.Now().Format("20060102-150405.000"))
+		defer func() {
+			// Keep the files of a stopped or failed run, as the front ends say.
+			if runErr == nil || len(walkAudio(o.WorkDir)) == 0 {
+				_ = os.RemoveAll(o.WorkDir)
+			}
+		}()
 	}
 	if o.Bitrate == "" {
 		o.Bitrate = "320"
@@ -196,14 +209,38 @@ func Run(ctx context.Context, o *Options) (result *Result, runErr error) {
 	}
 	o.log("Collection: %s (%d tracks)", coll.Name, len(tracks))
 	if o.Event != nil {
-		ce := Event{Ev: "collection", Name: coll.Name, Kind: coll.Kind, Artist: coll.Artist}
+		ce := Event{Ev: "collection", Name: coll.Name, Kind: coll.Kind, Artist: coll.Artist, Cover: coll.Cover}
 		for _, t := range tracks {
-			ce.Tracks = append(ce.Tracks, TrackEvent{Artist: t.Artist, Title: t.Title, Duration: t.DurationSec})
+			ce.Tracks = append(ce.Tracks, TrackEvent{Artist: t.Artist, Title: t.Title, Duration: t.DurationSec, Album: t.Album, ID: t.ID})
 		}
 		o.emit(ce)
 		o.track = newTracker(o, tracks)
-		o.emit(Event{Ev: "phase", Phase: "soulseek"})
 	}
+	all := tracks
+	if o.Select != nil {
+		only, err := o.Select(ctx, len(tracks))
+		if err != nil {
+			return nil, err
+		}
+		if only != nil {
+			var sel []spotify.Track
+			seen := map[int]bool{}
+			for _, i := range only {
+				if i >= 0 && i < len(all) && !seen[i] {
+					seen[i] = true
+					sel = append(sel, all[i])
+				}
+			}
+			tracks = sel
+		}
+	}
+	if len(tracks) == 0 {
+		// Every track was skipped: nothing to download.
+		o.emit(Event{Ev: "phase", Phase: "done"})
+		o.emit(Event{Ev: "result", Files: 0, Count: 0, Dir: o.OutputDir, Name: coll.Name})
+		return &Result{Collection: coll.Name, OutputDir: o.OutputDir}, nil
+	}
+	o.emit(Event{Ev: "phase", Phase: "soulseek"})
 
 	safe := ytdlp.SafeName(coll.Name)
 	if safe == "" {
@@ -219,7 +256,9 @@ func Run(ctx context.Context, o *Options) (result *Result, runErr error) {
 	ssOut := filepath.Join(o.WorkDir, "soulseek")
 	ytOut := filepath.Join(o.WorkDir, "youtube")
 	var missing []missingTrack
-	useAlbumMode := coll.Kind == "album" && coll.Artist != ""
+	// The album folder holds every track, so album mode only fits a run of
+	// the whole album.
+	useAlbumMode := coll.Kind == "album" && coll.Artist != "" && len(tracks) == len(all)
 	// Server jobs contain one track. Prepare a fallback candidate while the
 	// Soulseek process searches/transfers, but never download speculative audio.
 	// Multi-track CLI/album runs stay lazy to avoid searching every song twice.
@@ -290,7 +329,17 @@ func Run(ctx context.Context, o *Options) (result *Result, runErr error) {
 	} else if useAlbumMode {
 		// An album is usually shared as one folder. One search finds every track.
 		o.log("Album mode: searching for the album folder...")
-		n, err := runSockseekAlbum(ssCtx, o, coll.Artist, coll.Name, ssOut)
+		if o.track != nil {
+			o.track.mu.Lock()
+			o.track.album = true
+			o.track.mu.Unlock()
+		}
+		n, err := runSockseekAlbum(ssCtx, o, coll.Artist, coll.Name, ssOut, len(tracks))
+		if o.track != nil {
+			o.track.mu.Lock()
+			o.track.album = false
+			o.track.mu.Unlock()
+		}
 		if sockseekGaveUp(err) {
 			o.log("Soulseek did not answer in %s", o.SockseekWait)
 			missing = allMissing(tracks)
@@ -302,19 +351,14 @@ func Run(ctx context.Context, o *Options) (result *Result, runErr error) {
 			return nil, err
 		} else if n > 0 {
 			o.log("Album folder found: %d audio files", n)
-			var names string
-			for _, f := range walkAudio(ssOut) {
-				names += normTitle(filepath.Base(f)) + "|"
-			}
-			for _, t := range tracks {
-				if !strings.Contains(names, normTitle(baseTitle(t.Title))) {
-					missing = append(missing, missingTrack{Artist: t.Artist, Title: t.Title, Duration: t.DurationSec})
-				}
-			}
+			missing = albumMissing(o, tracks, walkAudio(ssOut))
 			o.markAlbum(missing)
 			if len(missing) > 0 {
 				o.log("%d tracks are not in the album folder", len(missing))
-				if o.UseFallback {
+				// Search Soulseek for each of them before YouTube: other
+				// peers often have the tracks this folder is missing.
+				missing = o.searchTracks(ssCtx, missing, safe+" (tracks)", ssOut)
+				if len(missing) > 0 && o.UseFallback {
 					o.log("Trying YouTube Music for the missing tracks...")
 					fallback(ctx, o, missing, ytOut, prepared)
 				}
@@ -473,12 +517,18 @@ func runSockseek(ctx context.Context, o *Options, csvPath, outDir string) error 
 }
 
 // runSockseekAlbum searches for the album as one folder and downloads it.
-func runSockseekAlbum(ctx context.Context, o *Options, artist, album, outDir string) (int, error) {
+func runSockseekAlbum(ctx context.Context, o *Options, artist, album, outDir string, tracks int) (int, error) {
 	query := album
 	if artist != "" {
 		query = artist + " - " + album
 	}
-	args := []string{query, "-o", outDir, "--format", "mp3", "--pref-min-bitrate", o.Bitrate}
+	args := []string{query, "-o", outDir, "--format", "mp3", "--pref-min-bitrate", o.Bitrate,
+		// A folder with far fewer files is another edition: skip it. The
+		// tracks it would leave out are searched one by one afterwards.
+		"--min-album-track-count", strconv.Itoa(max(1, tracks*85/100)),
+		// A peer that sends one file and then waits is common. Give the rest
+		// of the folder more time before trying another folder.
+		"--max-stale-time", "90000"}
 	args = append(args, sockseekProgressArgs(o)...)
 	args = append(args, sockseekBaseArgs(o)...)
 	if err := runStream(ctx, o, args...); err != nil {
@@ -590,7 +640,12 @@ func fallback(ctx context.Context, o *Options, missing []missingTrack, ytOut str
 			o.trackState(m, StateMissing, Event{})
 			continue
 		}
-		o.trackState(m, StateDone, Event{Source: "youtube", Peer: "YouTube Music"})
+		if o.track != nil {
+			if i := o.track.findLocked(m.Artist, m.Title); i >= 0 {
+				o.track.setSrc(i, filepath.Join(ytOut, name+".mp3"))
+			}
+		}
+		o.trackState(m, StateDone, Event{Source: "youtube", Peer: "YouTube Music", URL: best.URL})
 	}
 }
 
@@ -605,7 +660,15 @@ func audioExt(path string) bool {
 func walkAudio(dir string) []string {
 	var out []string
 	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			// Sockseek moves the files of an album folder that did not
+			// finish to "failed".
+			if path != dir && info.Name() == "failed" {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if strings.HasSuffix(path, ".incomplete") {
@@ -662,6 +725,19 @@ func normalizeAll(ctx context.Context, o *Options, sources []string, destDir str
 			total += len(walkAudio(srcDir))
 		}
 	}
+	var assigned map[string]int
+	if o.track != nil {
+		var all []string
+		for _, srcDir := range sources {
+			all = append(all, walkAudio(srcDir)...)
+		}
+		assigned = o.track.assignFiles(all)
+	}
+	placed := func(src, dest string) {
+		if i, ok := assigned[src]; ok {
+			o.emit(Event{Ev: "file", I: intp(i), Path: dest})
+		}
+	}
 	for _, srcDir := range sources {
 		end := timing.Begin(ctx, "normalize.scan", filepath.Base(srcDir))
 		audio := walkAudio(srcDir)
@@ -690,24 +766,94 @@ func normalizeAll(ctx context.Context, o *Options, sources []string, destDir str
 					continue
 				}
 				count++
+				placed(src, dest)
 				continue
 			}
-			cctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 			end = timing.Begin(ctx, "normalize.ffmpeg", filepath.Base(src))
-			cmd := exec.CommandContext(cctx, o.FfmpegPath, "-y", "-loglevel", "error", "-i", src,
-				"-vn", "-map_metadata", "0", "-c:a", "libmp3lame", "-b:a", o.Bitrate+"k", dest)
-			err := cmd.Run()
+			// Keep the cover picture. A source whose picture ffmpeg cannot
+			// put in an mp3 is converted again without it.
+			err := transcode(ctx, o, src, dest, true)
+			if err != nil && ctx.Err() == nil {
+				err = transcode(ctx, o, src, dest, false)
+			}
 			end(err)
-			cancel()
 			if err != nil {
 				o.log("transcode failed for %s: %v", filepath.Base(src), err)
 				continue
 			}
 			count++
+			placed(src, dest)
 		}
 	}
 	o.emit(Event{Ev: "convert", Done: total, Count: total})
 	return count, nil
+}
+
+func transcode(ctx context.Context, o *Options, src, dest string, cover bool) error {
+	cctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	args := []string{"-y", "-loglevel", "error", "-i", src}
+	if cover {
+		args = append(args, "-map", "0:a:0", "-map", "0:v:0?", "-c:v", "copy", "-disposition:v:0", "attached_pic", "-id3v2_version", "3")
+	} else {
+		args = append(args, "-vn")
+	}
+	args = append(args, "-map_metadata", "0", "-c:a", "libmp3lame", "-b:a", o.Bitrate+"k", dest)
+	err := exec.CommandContext(cctx, o.FfmpegPath, args...).Run()
+	if err != nil {
+		_ = os.Remove(dest)
+	}
+	return err
+}
+
+// albumMissing returns the tracks that no file of the album folder is for.
+// Each file goes to the track with the longest matching title, so "Billie
+// Jean (Underground Mix)" does not count for "Billie Jean".
+func albumMissing(o *Options, tracks []spotify.Track, files []string) []missingTrack {
+	var missing []missingTrack
+	if o.track != nil {
+		used := map[int]bool{}
+		for _, i := range o.track.assignFiles(files) {
+			used[i] = true
+		}
+		for _, t := range tracks {
+			if i := o.track.findLocked(t.Artist, t.Title); i < 0 || !used[i] {
+				missing = append(missing, missingTrack{Artist: t.Artist, Title: t.Title, Duration: t.DurationSec})
+			}
+		}
+		return missing
+	}
+	var names string
+	for _, f := range files {
+		names += normTitle(filepath.Base(f)) + "|"
+	}
+	for _, t := range tracks {
+		if !strings.Contains(names, normTitle(baseTitle(t.Title))) {
+			missing = append(missing, missingTrack{Artist: t.Artist, Title: t.Title, Duration: t.DurationSec})
+		}
+	}
+	return missing
+}
+
+// searchTracks runs Sockseek for each of the missing tracks and returns the
+// ones it did not find. A failure to run it leaves them all missing.
+func (o *Options) searchTracks(ctx context.Context, missing []missingTrack, name, ssOut string) []missingTrack {
+	var tracks []spotify.Track
+	for _, m := range missing {
+		tracks = append(tracks, spotify.Track{Artist: m.Artist, Title: m.Title, DurationSec: m.Duration})
+	}
+	csvPath := filepath.Join(o.WorkDir, name+".csv")
+	if err := writeTracksCSV(csvPath, tracks); err != nil {
+		return missing
+	}
+	o.log("Searching Soulseek for the %d tracks one by one...", len(tracks))
+	for _, m := range missing {
+		o.trackState(m, StateSearching, Event{})
+	}
+	if err := runSockseek(ctx, o, csvPath, ssOut); err != nil {
+		return missing
+	}
+	return readMissing(filepath.Join(ssOut, name, "_index.csv"), tracks)
 }
 
 // markAlbum marks the tracks found in an album folder as done, and the rest as failed.
@@ -725,7 +871,7 @@ func (o *Options) markAlbum(missing []missingTrack) {
 	}
 	for i := range o.track.tracks {
 		if miss[i] {
-			o.track.set(i, StateFailed, Event{})
+			o.track.setAny(i, StateFailed, Event{})
 		} else if o.track.state[i] != StateDone {
 			o.track.set(i, StateDone, Event{Source: "soulseek"})
 		}
