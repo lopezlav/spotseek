@@ -26,7 +26,7 @@ func TestTrackStateWaitsForTheTerminalOutcome(t *testing.T) {
 	if len(*got) != 1 || (*got)[0].State != StateDone || (*got)[0].BitRate != 320 || (*got)[0].Peer != "peer1" {
 		t.Fatalf("want one done event, got %+v", *got)
 	}
-	if tr.src[0] != "/w/soulseek/Thriller.mp3" {
+	if tr.src[0] != filepath.Clean("/w/soulseek/Thriller.mp3") {
 		t.Fatalf("download path not kept: %q", tr.src[0])
 	}
 	// Outside album mode, a terminal failure of another track is a failure.
@@ -47,7 +47,7 @@ func TestAssignFilesUsesTheBestMatches(t *testing.T) {
 		spotify.Track{Artist: "Michael Jackson", Title: "Thriller - Instrumental"},
 		spotify.Track{Artist: "Enya", Title: "Only Time"},
 	)
-	tr.src[6] = "/w/x/whatever.mp3"
+	tr.src[6] = filepath.Clean("/w/x/whatever.mp3") // as the tracker stores it
 	// The real folder from the Thriller 25 run, in its own order.
 	dir := "/w/soulseek/Thriller 25/"
 	got := tr.assignFiles([]string{
