@@ -263,9 +263,11 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      # Only the app downloads: the ffmpeg-* artifacts are build inputs, not release files.
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: Spotseek-*
           merge-multiple: true
       - name: Generate checksums
         run: |
