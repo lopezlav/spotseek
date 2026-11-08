@@ -77,6 +77,8 @@ pub struct Cand {
     /// Seconds the download should take.
     pub eta: u32,
     pub failed: bool,
+    /// A peer that sent us good files before.
+    pub known: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

@@ -77,6 +77,12 @@ pub fn word(l: Lang, code: &str, title: &str, peer: &str, message: &str, count: 
                     "Soulseek se desconectó: tu cuenta entró en otro lado (otro Spotseek, Nicotine+ u otra computadora). Soulseek permite un solo lugar a la vez.",
                 )
                 .into()
+            } else if message.contains("no answer in time") {
+                l.t(
+                    "The Soulseek server does not answer. After too many searches (more than 34 in 3:40) it blocks the account for up to 30 minutes. Spotseek keeps trying; nothing is lost.",
+                    "El servidor de Soulseek no responde. Después de demasiadas búsquedas (más de 34 en 3:40) bloquea la cuenta hasta 30 minutos. Spotseek sigue intentando; no se pierde nada.",
+                )
+                .into()
             } else {
                 l.t("The connection to Soulseek dropped. Downloads wait; nothing is lost.", "Se cortó la conexión con Soulseek. Las descargas esperan; no se pierde nada.").into()
             }
@@ -199,6 +205,34 @@ pub fn word(l: Lang, code: &str, title: &str, peer: &str, message: &str, count: 
                 format!("{t}: it could not be made into an mp3.")
             }
         }
+        "found_free" => {
+            let how = match (message, es) {
+                ("cache", false) => "from a search made in the last hours",
+                ("cache", true) => "de una búsqueda de las últimas horas",
+                (_, false) => "in the folder of a peer that has other songs of the list",
+                (_, true) => "en la carpeta de alguien que tiene otras canciones de la lista",
+            };
+            if es {
+                format!("{t}: encontrada {how}, sin gastar una búsqueda.")
+            } else {
+                format!("{t}: found {how}, without using a search.")
+            }
+        }
+        "browsed" => {
+            if es {
+                format!("La carpeta de {p} tiene {count} canciones más de la lista: no hace falta buscarlas.")
+            } else {
+                format!("{p}'s folder has {count} more songs of the list: no need to search for them.")
+            }
+        }
+        "memory" => {
+            let peers = message;
+            if es {
+                format!("Se miró en lo que comparten {peers} usuarios que ya te mandaron buenos archivos: {count} canciones encontradas sin buscar.")
+            } else {
+                format!("Looked in the shares of {peers} peers that sent you good files before: {count} songs found without a search.")
+            }
+        }
         "stopping" => l.t("Stopping: the finished songs are converted and kept.", "Frenando: las canciones terminadas se convierten y se guardan.").into(),
         _ => String::new(),
     }
@@ -212,13 +246,14 @@ mod tests {
     fn every_code_has_words_in_both_languages() {
         for code in [
             "signed_in", "no_account", "login_failed", "offline", "reconnecting", "reconnected", "search_limit", "found", "no_files", "queued", "peer_failed", "gave_up",
-            "downloaded", "yt_done", "yt_no_match", "yt_blocked", "yt_failed", "missing", "convert_failed", "stopping",
+            "downloaded", "yt_done", "yt_no_match", "yt_blocked", "yt_failed", "missing", "convert_failed", "stopping", "found_free", "browsed", "memory",
         ] {
             for l in [Lang::En, Lang::Es] {
                 assert!(!word(l, code, "A – B", "peer", "", 3, 40).is_empty(), "{code} {l:?}");
             }
         }
         assert!(word(Lang::En, "offline", "", "", "relogged", 0, 0).contains("somewhere else"));
+        assert!(word(Lang::Es, "offline", "", "", "cannot reach the Soulseek server: no answer in time", 0, 0).contains("30 minutos"));
         assert!(word(Lang::Es, "peer_failed", "A – B", "zwem", "queued", 0, 0).contains("cola"));
         assert!(word(Lang::En, "unknown", "", "", "", 0, 0).is_empty());
     }

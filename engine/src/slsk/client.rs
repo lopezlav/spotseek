@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::proto::{self, Init, PeerMsg};
 use super::ratelimit::{self, Window};
-use super::types::{DownloadError, LoginAnswer, Progress, SearchResponse};
+use super::types::{DownloadError, LoginAnswer, Progress, SearchResponse, SharedFile};
 use super::{ConnectError, OnProgress, Search};
 
 /// Time for a direct TCP connection to a peer (and for the server to give its address).
@@ -48,11 +48,26 @@ const PING_EVERY: Duration = Duration::from_secs(120);
 const SEARCH_MAX: usize = 34;
 const SEARCH_WINDOW: Duration = Duration::from_secs(220);
 
+static SEARCH_JOURNAL: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Keep the search times in this file, so the next run counts them. The server counts by
+/// account: a link started right after another one must not search 34 more times (more than 34
+/// in 220 s, and Soulseek closes the connection and bans the account for a while). Call it
+/// before the first search.
+pub fn remember_searches(path: std::path::PathBuf) {
+    let _ = SEARCH_JOURNAL.set(path);
+}
+
 /// One search limit for the whole process: a new session after a reconnect counts the
-/// searches of the one before (the server counts by account).
+/// searches of the one before, and with `remember_searches` so does the next run.
 fn limiter() -> &'static tokio::sync::Mutex<Window> {
     static L: std::sync::OnceLock<tokio::sync::Mutex<Window>> = std::sync::OnceLock::new();
-    L.get_or_init(|| tokio::sync::Mutex::new(Window::new(SEARCH_MAX, SEARCH_WINDOW)))
+    L.get_or_init(|| {
+        tokio::sync::Mutex::new(match SEARCH_JOURNAL.get() {
+            Some(p) => Window::with_journal(SEARCH_MAX, SEARCH_WINDOW, p.clone()),
+            None => Window::new(SEARCH_MAX, SEARCH_WINDOW),
+        })
+    })
 }
 
 /// How long a new search would wait for the limit now.
@@ -79,6 +94,10 @@ pub struct Inner {
     searches: Mutex<HashMap<u32, mpsc::UnboundedSender<SearchResponse>>>,
     /// The newest open P connection to each user.
     peers: Mutex<HashMap<String, PeerConn>>,
+    /// Users we asked for their share list → who waits for it.
+    share_waiters: Mutex<HashMap<String, Vec<oneshot::Sender<Vec<SharedFile>>>>>,
+    /// FolderContentsRequest token → who waits for the answer.
+    folder_waiters: Mutex<HashMap<u32, oneshot::Sender<Vec<SharedFile>>>>,
     /// Our ConnectToPeer tokens that wait for the peer's PierceFirewall.
     indirect: Mutex<HashMap<u32, oneshot::Sender<TcpStream>>>,
     /// Users we asked the server for an address.
@@ -232,6 +251,8 @@ impl Inner {
             searches: Mutex::default(),
             peers: Mutex::default(),
             indirect: Mutex::default(),
+            share_waiters: Mutex::default(),
+            folder_waiters: Mutex::default(),
             addr_waiters: Mutex::default(),
             downloads: Mutex::default(),
             transfers: Mutex::default(),
@@ -504,6 +525,25 @@ impl Inner {
             self.route_search_response(user, body);
             return;
         }
+        if code == proto::peer::SHARED_FILE_LIST_RESPONSE {
+            let waiters = lock(&self.share_waiters).remove(user).unwrap_or_default();
+            if !waiters.is_empty() {
+                let files = proto::parse_shared_file_list(body).unwrap_or_default();
+                debug!("share list of {user}: {} files", files.len());
+                for w in waiters {
+                    let _ = w.send(files.clone());
+                }
+            }
+            return;
+        }
+        if code == proto::peer::FOLDER_CONTENTS_RESPONSE {
+            if let Ok((token, files)) = proto::parse_folder_contents(body) {
+                if let Some(w) = lock(&self.folder_waiters).remove(&token) {
+                    let _ = w.send(files);
+                }
+            }
+            return;
+        }
         let Ok(Some(msg)) = proto::parse_peer_msg(code, body) else { return };
         let event = |filename: String, ev: DlEvent| {
             let slot = lock(&self.downloads).get(&(user.to_string(), filename)).cloned();
@@ -759,6 +799,39 @@ impl Inner {
         drop(stream);
         progress(Progress::Bytes(got));
         Ok(got)
+    }
+
+    /// Everything `user` shares (a free peer message, not a search). Fails after `max`.
+    pub async fn browse(self: &Arc<Self>, user: &str, max: Duration) -> anyhow::Result<Vec<SharedFile>> {
+        let cancel = self.shutdown.child_token();
+        let conn = timeout(max, self.get_peer(user, &cancel)).await.map_err(|_| anyhow::anyhow!("no connection to {user}"))?.map_err(|e| anyhow::anyhow!("{e}"))?;
+        let (tx, rx) = oneshot::channel();
+        lock(&self.share_waiters).entry(user.to_string()).or_default().push(tx);
+        let _ = conn.tx.send(proto::shared_file_list_request());
+        match timeout(max, rx).await {
+            Ok(Ok(files)) => Ok(files),
+            _ => {
+                lock(&self.share_waiters).remove(user);
+                anyhow::bail!("{user} did not send its share list")
+            }
+        }
+    }
+
+    /// The files in one folder of `user` (a free peer message, not a search).
+    pub async fn browse_folder(self: &Arc<Self>, user: &str, folder: &str, max: Duration) -> anyhow::Result<Vec<SharedFile>> {
+        let cancel = self.shutdown.child_token();
+        let conn = timeout(max, self.get_peer(user, &cancel)).await.map_err(|_| anyhow::anyhow!("no connection to {user}"))?.map_err(|e| anyhow::anyhow!("{e}"))?;
+        let token = self.token();
+        let (tx, rx) = oneshot::channel();
+        lock(&self.folder_waiters).insert(token, tx);
+        let _ = conn.tx.send(proto::folder_contents_request(token, folder));
+        match timeout(max, rx).await {
+            Ok(Ok(files)) => Ok(files),
+            _ => {
+                lock(&self.folder_waiters).remove(&token);
+                anyhow::bail!("{user} did not send the folder")
+            }
+        }
     }
 
     pub async fn search(&self, query: &str) -> anyhow::Result<Search> {

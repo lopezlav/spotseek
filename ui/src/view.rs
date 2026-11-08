@@ -876,6 +876,10 @@ fn cand_row(s: &State, i: usize, t: &Track, k: usize, c: &crate::backend::Cand, 
         .child(cell_text("eta", eta, 52.0, dim))
         .child(text(c.user.to_uppercase()).key("user").font(mono(11.5, 600.0)).color(fg).w(130.0).truncate())
         .child(text(if c.folder.is_empty() { c.file.clone() } else { format!("{}  ·  {}", c.file, c.folder) }).key("file").font(mono(11.0, 400.0)).color(dim).truncate().grow(1.0).min_w(0.0));
+    if c.known && !c.failed {
+        // It sent good files before (peer memory).
+        r = r.child(row().px(5.0).py(1.0).border(1.0, green).child(text(l.t("KNOWN", "CONOCIDO")).font(mono(10.0, 600.0)).color(green)));
+    }
     if k == 0 && !c.failed {
         r = r.child(row().px(5.0).py(1.0).fill(green).child(text(l.t("BEST", "MEJOR")).font(mono(10.0, 600.0)).color(ink())));
     }

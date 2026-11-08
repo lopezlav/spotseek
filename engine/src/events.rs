@@ -154,6 +154,9 @@ pub struct CandInfo {
     /// Tried and failed in this run.
     #[serde(skip_serializing_if = "is_false")]
     pub failed: bool,
+    /// A peer that sent us good files before (peer memory).
+    #[serde(skip_serializing_if = "is_false")]
+    pub known: bool,
 }
 
 /// Writes events to stdout, one JSON line each, from any thread.
