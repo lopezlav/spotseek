@@ -19,6 +19,8 @@ pub struct Settings {
     pub manual: bool,
     /// A song plays while the mouse is over it (else on a click).
     pub hover_play: bool,
+    /// The version the user said LATER to (it is not offered again; a newer one is).
+    pub skip_update: String,
 }
 
 pub fn home() -> PathBuf {
@@ -35,6 +37,7 @@ impl Default for Settings {
             lang: "auto".into(),
             manual: false,
             hover_play: false,
+            skip_update: String::new(),
         }
     }
 }

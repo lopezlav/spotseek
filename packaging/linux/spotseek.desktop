@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Spotseek
+Comment=Paste a Spotify link, get mp3 files
+Exec=spotseek
+Icon=spotseek
+Terminal=false
+Categories=AudioVideo;Audio;Network;

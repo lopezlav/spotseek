@@ -12,6 +12,9 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 VERSION=${VERSION:-2.0.0}
 OUT="$ROOT/ui/target/Spotseek.app"
 
+# macOS 12 (Monterey) or later: the oldest the bundled tools run on (Deno needs 12).
+export MACOSX_DEPLOYMENT_TARGET=12.0
+
 echo "Building the engine..."
 (cd "$ROOT/engine" && cargo build --release)
 echo "Building the Rune UI..."
@@ -49,7 +52,7 @@ cat > "$OUT/Contents/Info.plist" <<PLIST
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleVersion</key><string>$VERSION</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.music</string>
-  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>LSMinimumSystemVersion</key><string>12.0</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict>
 </plist>

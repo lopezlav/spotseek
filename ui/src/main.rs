@@ -17,6 +17,7 @@ mod model;
 mod notes;
 mod sdf;
 mod settings;
+mod update;
 mod view;
 
 use std::time::Duration;
@@ -405,6 +406,19 @@ fn scene_failed(s: &mut State) {
     s.error = "spotify: this playlist is private or does not exist".into();
 }
 
+/// A newer version is out: the banner on the paste screen.
+fn scene_update(s: &mut State) {
+    s.update = update::Up::Ready { version: "0.2.4".into(), page: String::new(), kind: "app".into() };
+}
+
+fn scene_updating(s: &mut State) {
+    s.update = update::Up::Downloading { version: "0.2.4".into(), page: String::new(), frac: 0.42 };
+}
+
+fn scene_update_failed(s: &mut State) {
+    s.update = update::Up::Failed { version: "0.2.4".into(), page: String::new(), message: "the download of Spotseek-macOS-arm64.zip is damaged".into() };
+}
+
 fn scene_settings(s: &mut State) {
     s.settings_open = true;
 }
@@ -434,6 +448,9 @@ fn main() {
             ("preview", scene_preview),
             ("playing", scene_playing),
             ("log", scene_log),
+            ("update", scene_update),
+            ("updating", scene_updating),
+            ("update-failed", scene_update_failed),
         ],
         fonts: FONTS,
         families: ("Inter", "IBM Plex Mono"),
@@ -446,6 +463,7 @@ fn main() {
     app.init(move || {
         let mut s = State::new(Some(handle));
         s.ask_login_at_launch();
+        s.check_update();
         s
     })
         .on_close(|s: &mut State, _| {

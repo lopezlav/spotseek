@@ -17,6 +17,7 @@ use crate::history::{self, History, Library, SavedTrack, Session};
 use crate::media::Media;
 use crate::notes::{self, Level, Note};
 use crate::settings::{Settings, config_dir};
+use crate::update::{self, Up};
 
 /// Seconds the user has to answer "you already have these" once nothing else is downloading.
 pub const ASK_SECS: f64 = 10.0;
@@ -298,6 +299,8 @@ pub struct State {
     pub soulseek_down: bool,
     /// The track that plays because the mouse is over it.
     pub hover_started: Option<usize>,
+    /// A newer Spotseek: the banner on the paste screen, and the update as it goes.
+    pub update: Up,
     pub media: Media,
 }
 
@@ -374,6 +377,7 @@ impl State {
             log_tech: false,
             soulseek_down: false,
             hover_started: None,
+            update: Up::None,
             media,
         }
     }
@@ -890,6 +894,74 @@ impl State {
     // ---------------------------------------------------------------- account
 
     /// Opens the sign-in window at launch when there is no account.
+    // ---------------------------------------------------------------- updates
+
+    /// At launch: asks for a newer version (not in tests, headless scenes or the demo).
+    pub fn check_update(&self) {
+        if !self.persist || std::env::var_os("SPOTSEEK_NO_UPDATE_CHECK").is_some() {
+            return;
+        }
+        let Some(h) = self.handle.clone() else { return };
+        std::thread::spawn(move || {
+            if let Some(l) = update::check() {
+                h.update(move |s, _| s.update_found(l));
+            }
+        });
+    }
+
+    pub fn update_found(&mut self, l: update::Line) {
+        if l.newer && l.version != self.settings.skip_update && self.update == Up::None {
+            self.update = Up::Ready { version: l.version, page: l.page, kind: l.kind };
+        }
+    }
+
+    /// LATER: this version is not offered again (a newer one is).
+    pub fn update_later(&mut self) {
+        self.settings.skip_update = self.update.version().to_string();
+        if self.persist {
+            self.settings.save();
+        }
+        self.update = Up::None;
+    }
+
+    /// UPDATE: downloads and installs it, then Spotseek starts again. Never during a download;
+    /// a copy that cannot replace itself opens the download page.
+    pub fn update_now(&mut self, tx: &mut rune::Tx) {
+        let (version, page) = (self.update.version().to_string(), self.update.page());
+        if self.update.busy() || version.is_empty() || self.phase == Phase::Running {
+            return;
+        }
+        if matches!(&self.update, Up::Ready { kind, .. } if kind == "manual") {
+            let _ = tx.open_url(&page);
+            return;
+        }
+        let Some(h) = self.handle.clone() else { return };
+        self.update = Up::Downloading { version, page, frac: 0.0 };
+        std::thread::spawn(move || {
+            update::install(|l| h.update(move |s, tx| s.update_line(l, tx)));
+        });
+    }
+
+    pub fn update_line(&mut self, l: update::Line, tx: &mut rune::Tx) {
+        let (version, page) = (self.update.version().to_string(), self.update.page());
+        match l.state.as_str() {
+            "downloading" => {
+                let frac = if l.total > 0 { (l.bytes as f64 / l.total as f64).clamp(0.0, 1.0) as f32 } else { 0.0 };
+                self.update = Up::Downloading { version, page, frac };
+            }
+            "installing" => self.update = Up::Installing { version },
+            "ready" => {
+                self.media.stop();
+                match update::launch(&l.run, &l.args) {
+                    Ok(()) => tx.quit(),
+                    Err(e) => self.update = Up::Failed { version, page, message: e.to_string() },
+                }
+            }
+            "failed" => self.update = Up::Failed { version, page, message: l.message },
+            _ => {}
+        }
+    }
+
     pub fn ask_login_at_launch(&mut self) {
         if self.persist && self.account == Account::None {
             self.login_open = true;

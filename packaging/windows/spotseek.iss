@@ -4,8 +4,12 @@
 ; Expected inputs, relative to the repository root:
 ;   build\windows\Spotseek.exe          - the app window (Rune UI)
 ;   build\windows\spotseek-backend.exe  - the engine (Rust) that the window runs
-;   build\bin\*                 - bundled tools (yt-dlp, ffmpeg, ffprobe, deno)
-; Output: build\installer\Spotseek-Setup-<version>.exe
+;   build\bin\*                 - bundled tools (yt-dlp, ffmpeg, deno)
+; Output: build\installer\Spotseek-Setup-windows-x64.exe (one name for every version, so
+; https://github.com/lopezlav/spotseek/releases/latest/download/Spotseek-Setup-windows-x64.exe works).
+;
+; The app updates itself by running this installer with /SILENT /CLOSEAPPLICATIONS /RELAUNCH=1:
+; it closes Spotseek, replaces it and starts it again.
 
 #ifndef AppVersion
 #define AppVersion "0.0.0"
@@ -27,7 +31,9 @@ AppPublisher=Spotseek
 DefaultDirName={autopf}\{#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir={#SourceRoot}build\installer
-OutputBaseFilename=Spotseek-Setup-{#AppVersion}
+OutputBaseFilename=Spotseek-Setup-windows-x64
+CloseApplications=yes
+RestartApplications=no
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -53,3 +59,11 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Start {#MyAppName}"; Flags: nowait postinstall skipifsilent
+; An update from the app (/RELAUNCH=1): start the new version when it is in place.
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait runasoriginaluser; Check: Relaunch
+
+[Code]
+function Relaunch: Boolean;
+begin
+  Result := ExpandConstant('{param:relaunch|0}') = '1';
+end;

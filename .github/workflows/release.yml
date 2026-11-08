@@ -37,12 +37,53 @@ jobs:
           version = os.environ['GITHUB_REF_NAME'][1:] if os.environ['GITHUB_REF_TYPE'] == 'tag' else os.environ['INPUT_VERSION']
           if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version):
               raise SystemExit('Use a version like 0.1.0 (tag v0.1.0)')
+          # The app offers an update when the newest release is above its own version, so the
+          # programs must carry the release's version.
+          for toml in ('ui/Cargo.toml', 'engine/Cargo.toml'):
+              found = re.search(r'^version = "([^"]+)"', open(toml).read(), re.M).group(1)
+              if found != version:
+                  raise SystemExit(f'{toml} has version {found}; set it to {version} first')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
               out.write(f"version={version}\n")
           PY
 
+  # A small LGPL ffmpeg (only what Spotseek and yt-dlp use), built from source once per change of
+  # the script and kept in the Actions cache. See scripts/build-ffmpeg.sh.
+  ffmpeg:
+    name: ffmpeg (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: darwin-arm64, runner: macos-latest }
+          - { platform: darwin-x64, runner: macos-15-intel }
+          - { platform: linux-x64, runner: ubuntu-22.04 }
+          - { platform: win-x64, runner: ubuntu-22.04 }
+    steps:
+      - uses: actions/checkout@v4
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          path: build/ffmpeg
+          key: ffmpeg-${{ matrix.platform }}-${{ hashFiles('scripts/build-ffmpeg.sh') }}
+      - name: Install mingw-w64
+        if: steps.cache.outputs.cache-hit != 'true' && matrix.platform == 'win-x64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mingw-w64
+      - name: Build ffmpeg
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: bash scripts/build-ffmpeg.sh ${{ matrix.platform }} build/ffmpeg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-${{ matrix.platform }}
+          path: build/ffmpeg/
+          if-no-files-found: error
+
   build:
-    needs: prepare
+    needs: [prepare, ffmpeg]
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
@@ -53,7 +94,14 @@ jobs:
           - name: macOS (Apple Silicon)
             runner: macos-latest
             platform: darwin-arm64
+            arch: arm64
             artifact: Spotseek-macOS-arm64
+          # Intel Macs (2015 to 2020), built and tested on an Intel runner.
+          - name: macOS (Intel)
+            runner: macos-15-intel
+            platform: darwin-x64
+            arch: x64
+            artifact: Spotseek-macOS-x64
           - name: Windows (x64)
             runner: windows-latest
             platform: win-x64
@@ -97,13 +145,24 @@ jobs:
           cargo build --release --locked
       - name: Download verified bundled tools
         run: python scripts/fetch-tools.py build/bin ${{ matrix.platform }}
+      - name: Get the ffmpeg built above
+        uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg-${{ matrix.platform }}
+          path: build/ffmpeg
       - name: Collect third-party notices
         run: python scripts/collect-notices.py build/notices ${{ matrix.platform }}
+      - name: Add ffmpeg and its licenses
+        shell: bash
+        run: |
+          cp build/ffmpeg/ffmpeg* build/bin/
+          cp build/ffmpeg/licenses/* build/notices/
+          if [ "$RUNNER_OS" != Windows ]; then chmod +x build/bin/*; fi
       - name: Package and test macOS app
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          test "$(uname -m)" = arm64
+          case "${{ matrix.arch }}" in arm64) test "$(uname -m)" = arm64 ;; x64) test "$(uname -m)" = x86_64 ;; esac
           # The app window (Rune UI) is the app; the engine runs next to it as its backend.
           # package-mac.sh builds both, adds build/bin and build/notices, and signs ad hoc.
           VERSION="$APP_VERSION" ui/package-mac.sh
@@ -111,7 +170,16 @@ jobs:
           codesign --verify --deep --strict Spotseek.app
           python scripts/smoke-test.py Spotseek.app/Contents/Resources/bin Spotseek.app/Contents/MacOS/spotseek Spotseek.app/Contents/MacOS/spotseek-backend
           mkdir -p build/artifacts
-          ditto -c -k --sequesterRsrc --keepParent Spotseek.app build/artifacts/Spotseek-macOS-arm64.zip
+          name=Spotseek-macOS-${{ matrix.arch }}
+          # The zip is what the app's updater and Homebrew download.
+          ditto -c -k --sequesterRsrc --keepParent Spotseek.app "build/artifacts/$name.zip"
+          # The disk image is for people: drag Spotseek to Applications.
+          dmg=$(mktemp -d)/Spotseek
+          mkdir -p "$dmg"
+          ditto Spotseek.app "$dmg/Spotseek.app"
+          ln -s /Applications "$dmg/Applications"
+          hdiutil create -volname Spotseek -srcfolder "$dmg" -fs HFS+ -format UDZO -ov "build/artifacts/$name.dmg"
+          hdiutil verify "build/artifacts/$name.dmg"
       - name: Package Windows app
         if: runner.os == 'Windows'
         shell: pwsh
@@ -129,7 +197,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path build/installer | Out-Null
           & "C:/Program Files (x86)/Inno Setup 6/ISCC.exe" "/DAppVersion=$env:APP_VERSION" packaging/windows/spotseek.iss
           if ($LASTEXITCODE -ne 0) { throw "Installer compilation failed" }
-          $installer = (Get-ChildItem build/installer/Spotseek-Setup-*.exe).FullName
+          $installer = (Resolve-Path build/installer/Spotseek-Setup-windows-x64.exe).Path
           $target = Join-Path $env:RUNNER_TEMP "Spotseek smoke test"
           $install = Start-Process -FilePath $installer -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', "/DIR=`"$target`"") -PassThru -Wait
           if ($install.ExitCode -ne 0) { throw "Installer exited $($install.ExitCode)" }
@@ -170,6 +238,17 @@ jobs:
           test -f "$installed/licenses/rust-crates.txt"
           "$installed/install.sh" --uninstall
           test ! -e "$installed"
+      - name: Build and test the AppImage
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get install -y --no-install-recommends desktop-file-utils
+          packaging/linux/build-appimage.sh build/linux/Spotseek build/artifacts/Spotseek-linux-x64.AppImage
+          # Test what is inside, then that the file itself starts (no FUSE on the runner).
+          cd "$RUNNER_TEMP"
+          "$GITHUB_WORKSPACE/build/artifacts/Spotseek-linux-x64.AppImage" --appimage-extract >/dev/null
+          python "$GITHUB_WORKSPACE/scripts/smoke-test.py" squashfs-root/bin squashfs-root/spotseek squashfs-root/spotseek-backend
+          APPIMAGE_EXTRACT_AND_RUN=1 "$GITHUB_WORKSPACE/build/artifacts/Spotseek-linux-x64.AppImage" --list-scenes | grep -q downloading
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
@@ -189,8 +268,10 @@ jobs:
           path: dist
           merge-multiple: true
       - name: Generate checksums
-        working-directory: dist
-        run: sha256sum Spotseek* > SHA256SUMS.txt
+        run: |
+          # The install scripts are release files too, so the one-line install has a fixed address.
+          cp packaging/install.sh packaging/install.ps1 dist/
+          cd dist && sha256sum Spotseek* install.sh install.ps1 > SHA256SUMS.txt
       - name: Create complete draft release
         uses: softprops/action-gh-release@v2
         with:

@@ -14,6 +14,7 @@ use crate::i18n::{self, Lang};
 use crate::media::{Cover, Wave, clock};
 use crate::model::{Detail, Phase, State, TState, Track};
 use crate::notes::Level;
+use crate::update::Up;
 
 // ------------------------------------------------------------------ look
 
@@ -168,7 +169,11 @@ fn idle(s: &State, size: [f32; 2]) -> El {
     } else {
         el().key("no-account")
     };
-    col().key("idle").w_full().h_full().px(44.0).pt(36.0).pb(14.0).gap(18.0)
+    let mut page = col().key("idle").w_full().h_full().px(44.0).pt(36.0).pb(14.0).gap(18.0);
+    if s.update != Up::None {
+        page = page.child(update_banner(s));
+    }
+    page
         .child(headline(s, l.t("Paste a Spotify link", "Pegá un link de Spotify")).grow(1.0).min_h(160.0))
         .child(row().w_full().center().gap(18.0).pt(10.0)
             .child(col().w(field_w).gap(6.0).child(field).child(underline))
@@ -177,6 +182,70 @@ fn idle(s: &State, size: [f32; 2]) -> El {
         .child(row().w_full().center().child(account_note))
         .child(el().h(8.0))
         .child(footer)
+}
+
+/// A newer Spotseek: UPDATE downloads it and starts it again; LATER hides this version.
+fn update_banner(s: &State) -> El {
+    let l = s.lang;
+    let small = |key: &str, label: &str, dark: bool, fg_light: Color| {
+        let (bg, fg) = if dark { (ink(), yellow()) } else { (Color::TRANSPARENT, fg_light) };
+        row().key(key).h(28.0).px(10.0).center().fill(bg).border(2.0, ink()).cursor(Cursor::Pointer).role("button").label(label)
+            .hover(red())
+            .child(text(label).font(mono(12.0, 600.0)).color(fg))
+    };
+    let page = s.update.page();
+    let whats_new = {
+        let page = page.clone();
+        small("update-notes", l.t("WHAT'S NEW", "QUÉ HAY DE NUEVO"), false, ink()).on_press_tx(move |_: &mut State, tx: &mut Tx| {
+            let _ = tx.open_url(&page);
+        })
+    };
+    let later = row().key("update-later").size(28.0, 28.0).center().cursor(Cursor::Pointer).role("button").label(l.t("Later", "Después"))
+        .hover(red())
+        .on_press(|s: &mut State| s.update_later())
+        .child(text("×").font(mono(18.0, 600.0)).color(ink()));
+    let mut frac = None;
+    let (msg, buttons): (String, Vec<El>) = match &s.update {
+        Up::Ready { version, kind, .. } => {
+            // The banner is on the paste screen only, so no download runs while it updates.
+            let msg = match l {
+                Lang::En => format!("SPOTSEEK {version} IS OUT · YOU HAVE {}", env!("CARGO_PKG_VERSION")),
+                Lang::Es => format!("SALIÓ SPOTSEEK {version} · TENÉS LA {}", env!("CARGO_PKG_VERSION")),
+            };
+            let go = if kind == "manual" { l.t("DOWNLOAD", "DESCARGAR") } else { l.t("UPDATE", "ACTUALIZAR") };
+            let go = small("update-go", go, true, ink()).on_press_tx(|s: &mut State, tx: &mut Tx| s.update_now(tx));
+            (msg, vec![whats_new, go, later])
+        }
+        Up::Downloading { version, frac: f, .. } => {
+            frac = Some(*f);
+            (format!("{} {version} · {}%", l.t("DOWNLOADING SPOTSEEK", "DESCARGANDO SPOTSEEK"), (f * 100.0).round() as u32), vec![])
+        }
+        Up::Installing { version } => (format!("{} {version} · {}", l.t("INSTALLING", "INSTALANDO"), l.t("SPOTSEEK OPENS AGAIN IN A MOMENT", "SPOTSEEK SE ABRE DE NUEVO EN UN MOMENTO")), vec![]),
+        Up::Failed { message, .. } => (
+            format!("{} {}", l.t("THE UPDATE FAILED:", "LA ACTUALIZACIÓN FALLÓ:"), message.to_uppercase()),
+            vec![
+                small("update-page", l.t("DOWNLOAD PAGE", "PÁGINA DE DESCARGA"), false, ink()).on_press_tx(move |_: &mut State, tx: &mut Tx| {
+                    let _ = tx.open_url(&page);
+                }),
+                later,
+            ],
+        ),
+        Up::None => (String::new(), vec![]),
+    };
+    let failed = matches!(s.update, Up::Failed { .. });
+    let mut line = row().w_full().h(40.0).px(14.0).gap(12.0).center_y()
+        .child(el().size(9.0, 9.0).radius(5.0).fill(if failed { red() } else { ink() }).cycle(BLINK))
+        .child(text(msg).key("update-msg").font(mono(12.0, 600.0)).color(if failed { red() } else { ink() }).truncate().grow(1.0).min_w(0.0));
+    for b in buttons {
+        line = line.child(b);
+    }
+    let mut banner = col().key("update-banner").w_full().fill(if failed { paper() } else { yellow() }).border(2.0, if failed { red() } else { ink() })
+        .transition(Transition::offset(0.0, -10.0).combined(Transition::opacity()))
+        .child(line);
+    if let Some(f) = frac {
+        banner = banner.child(el().key("update-progress").h(4.0).w_frac(f.max(0.01)).fill(ink()).motion(Spring::new(0.2, 0.0)));
+    }
+    banner
 }
 
 /// AUTO / MANUAL: who picks the Soulseek file for each song.

@@ -1,0 +1,62 @@
+name: Publish
+
+# After a release is published (gh release edit vX.Y.Z --draft=false --latest), tell the package
+# managers: the Homebrew tap gets the new cask, and winget gets a pull request. Each job runs only
+# when its token secret is set (see AGENTS.md, "Package managers").
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag (for example v0.2.4)
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  homebrew:
+    if: github.event_name == 'workflow_dispatch' || !github.event.release.prerelease
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag || github.event.release.tag_name }}
+      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Skip without a token
+        if: env.TAP_TOKEN == ''
+        run: echo "::notice::HOMEBREW_TAP_TOKEN is not set; the Homebrew tap was not updated."
+      - name: Update lopezlav/homebrew-tap
+        if: env.TAP_TOKEN != ''
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS.txt --dir "$RUNNER_TEMP"
+          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/lopezlav/homebrew-tap.git" "$RUNNER_TEMP/tap"
+          mkdir -p "$RUNNER_TEMP/tap/Casks"
+          python3 scripts/render-cask.py "${TAG#v}" "$RUNNER_TEMP/SHA256SUMS.txt" > "$RUNNER_TEMP/tap/Casks/spotseek.rb"
+          cd "$RUNNER_TEMP/tap"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/spotseek.rb
+          git diff --cached --quiet && { echo "The cask is already up to date."; exit 0; }
+          git commit -m "spotseek ${TAG#v}"
+          git push
+
+  winget:
+    if: github.event_name == 'workflow_dispatch' || !github.event.release.prerelease
+    runs-on: ubuntu-latest
+    env:
+      WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+    steps:
+      - name: Skip without a token
+        if: env.WINGET_TOKEN == ''
+        run: echo "::notice::WINGET_TOKEN is not set; no winget pull request was made."
+      # Needs the package in winget-pkgs already (the first version is sent by hand; see AGENTS.md).
+      - uses: vedantmgoyal9/winget-releaser@b7370d4d152efdce803a26cc6ca9eee58cb2ad54 # v2
+        if: env.WINGET_TOKEN != ''
+        with:
+          identifier: Lopezlav.Spotseek
+          installers-regex: 'Spotseek-Setup-windows-x64\.exe$'
+          release-tag: ${{ inputs.tag || github.event.release.tag_name }}
+          token: ${{ env.WINGET_TOKEN }}

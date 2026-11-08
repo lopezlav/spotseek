@@ -12,10 +12,8 @@ platform = sys.argv[2]
 out.mkdir(parents=True, exist_ok=True)
 manifest = json.loads((root / 'packaging/tools.json').read_text())
 v = manifest['versions']
-ffplatform = 'win32-x64' if platform == 'win-x64' else platform
+# ffmpeg is built by scripts/build-ffmpeg.sh, which writes its own license texts and sources.
 urls = {
-    'ffmpeg-LICENSE.txt': f"https://github.com/eugeneware/ffmpeg-static/releases/download/{v['ffmpeg']}/{ffplatform}.LICENSE",
-    'ffmpeg-README.txt': f"https://github.com/eugeneware/ffmpeg-static/releases/download/{v['ffmpeg']}/{ffplatform}.README",
     'yt-dlp-LICENSE.txt': f"https://raw.githubusercontent.com/yt-dlp/yt-dlp/{v['ytdlp']}/LICENSE",
     'yt-dlp-THIRD-PARTY.txt': f"https://raw.githubusercontent.com/yt-dlp/yt-dlp/{v['ytdlp']}/THIRD_PARTY_LICENSES.txt",
     'deno-LICENSE.txt': f"https://raw.githubusercontent.com/denoland/deno/{v['deno']}/LICENSE.md",
@@ -62,6 +60,5 @@ for pkg in packages.values():
     'Spotseek: https://github.com/lopezlav/spotseek (see the matching release tag)',
     f"yt-dlp: https://github.com/yt-dlp/yt-dlp/tree/{v['ytdlp']}",
     f"Deno: https://github.com/denoland/deno/tree/{v['deno']}",
-    f"FFmpeg binaries and build notices: https://github.com/eugeneware/ffmpeg-static/releases/tag/{v['ffmpeg']}",
-    'FFmpeg source/build provenance: see ffmpeg-README.txt and https://github.com/eugeneware/ffmpeg-static#sources-of-the-binaries',
+    'FFmpeg (LGPL build): see ffmpeg-SOURCES.txt and scripts/build-ffmpeg.sh in the Spotseek source',
 ]) + '\n')

@@ -35,7 +35,6 @@ pub struct Options {
     pub cover_out: Option<PathBuf>,
     pub limit: usize,
     pub ffmpeg: String,
-    pub ffprobe: String,
     pub ytdlp: String,
     /// Downloads at the same time (Soulseek and YouTube together; YouTube at most 2).
     pub parallel: usize,
@@ -294,7 +293,7 @@ async fn run_in(o: Options, emit: Emitter, mut controls: mpsc::UnboundedReceiver
 
     let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     let ctx = Arc::new(Ctx {
-        tools: Tools { ffmpeg: o.ffmpeg.clone(), ffprobe: o.ffprobe.clone() },
+        tools: Tools { ffmpeg: o.ffmpeg.clone() },
         yt: YtDlp { bin: o.ytdlp.clone() },
         downloads: Semaphore::new(o.parallel.max(1)),
         converts: Semaphore::new((cpus / 2).clamp(2, 6)),
