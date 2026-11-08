@@ -274,4 +274,21 @@ echo "==> ffmpeg $FFMPEG_VERSION"
   cp "ffmpeg$EXE" "$OUT_DIR/ffmpeg$EXE"
 )
 
+# The license texts and the exact sources, for the app's licenses folder (LGPL: the user may
+# rebuild ffmpeg from these sources with this script).
+LIC="$OUT_DIR/licenses"
+mkdir -p "$LIC"
+cp "$SRC/ffmpeg-$FFMPEG_VERSION/COPYING.LGPLv2.1" "$LIC/ffmpeg-COPYING.LGPLv2.1.txt"
+cp "$SRC/ffmpeg-$FFMPEG_VERSION/LICENSE.md" "$LIC/ffmpeg-LICENSE.md"
+cp "$SRC/lame-$LAME_VERSION/COPYING" "$LIC/lame-COPYING.txt"
+cp "$SRC/zlib-$ZLIB_VERSION/LICENSE" "$LIC/zlib-LICENSE.txt"
+cat >"$LIC/ffmpeg-SOURCES.txt" <<EOF
+ffmpeg in Spotseek is built from these sources by scripts/build-ffmpeg.sh
+(https://github.com/lopezlav/spotseek/blob/main/scripts/build-ffmpeg.sh), LGPL only:
+  FFmpeg $FFMPEG_VERSION  $FFMPEG_URL  sha256 $FFMPEG_SHA256
+  LAME $LAME_VERSION      $LAME_URL  sha256 $LAME_SHA256
+  zlib $ZLIB_VERSION      $ZLIB_URL  sha256 $ZLIB_SHA256
+To use your own ffmpeg, put it in place of the one in the app's bin folder.
+EOF
+
 echo "==> $OUT_DIR/ffmpeg$EXE ($(wc -c <"$OUT_DIR/ffmpeg$EXE" | tr -d ' ') bytes)"

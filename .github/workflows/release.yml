@@ -68,21 +68,18 @@ jobs:
         with:
           path: build/ffmpeg
           key: ffmpeg-${{ matrix.platform }}-${{ hashFiles('scripts/build-ffmpeg.sh') }}
-      - name: Install build tools
-        if: steps.cache.outputs.cache-hit != 'true' && runner.os == 'Linux'
+      - name: Install mingw-w64
+        if: steps.cache.outputs.cache-hit != 'true' && matrix.platform == 'win-x64'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends nasm pkg-config ${{ matrix.platform == 'win-x64' && 'mingw-w64' || '' }}
-      - name: Install build tools
-        if: steps.cache.outputs.cache-hit != 'true' && runner.os == 'macOS'
-        run: brew install nasm pkg-config || true
+          sudo apt-get install -y --no-install-recommends mingw-w64
       - name: Build ffmpeg
         if: steps.cache.outputs.cache-hit != 'true'
         run: bash scripts/build-ffmpeg.sh ${{ matrix.platform }} build/ffmpeg
       - uses: actions/upload-artifact@v4
         with:
           name: ffmpeg-${{ matrix.platform }}
-          path: build/ffmpeg/*
+          path: build/ffmpeg/
           if-no-files-found: error
 
   build:
@@ -148,16 +145,19 @@ jobs:
           cargo build --release --locked
       - name: Download verified bundled tools
         run: python scripts/fetch-tools.py build/bin ${{ matrix.platform }}
-      - name: Add the ffmpeg built above
+      - name: Get the ffmpeg built above
         uses: actions/download-artifact@v4
         with:
           name: ffmpeg-${{ matrix.platform }}
-          path: build/bin
-      - name: Make the tools executable
-        if: runner.os != 'Windows'
-        run: chmod +x build/bin/*
+          path: build/ffmpeg
       - name: Collect third-party notices
         run: python scripts/collect-notices.py build/notices ${{ matrix.platform }}
+      - name: Add ffmpeg and its licenses
+        shell: bash
+        run: |
+          cp build/ffmpeg/ffmpeg* build/bin/
+          cp build/ffmpeg/licenses/* build/notices/
+          if [ "$RUNNER_OS" != Windows ]; then chmod +x build/bin/*; fi
       - name: Package and test macOS app
         if: runner.os == 'macOS'
         shell: bash

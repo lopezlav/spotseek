@@ -1,16 +1,11 @@
 {
   "versions": {
-    "ffmpeg": "b6.1.1",
     "ytdlp": "2026.10.21",
-    "deno": "v2.9.8"
+    "deno": "v2.9.8",
+    "ffmpeg": "built by scripts/build-ffmpeg.sh"
   },
   "platforms": {
     "darwin-arm64": [
-      {
-        "name": "ffmpeg",
-        "url": "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-darwin-arm64",
-        "sha256": "a90e3db6a3fd35f6074b013f948b1aa45b31c6375489d39e572bea3f18336584"
-      },
       {
         "name": "yt-dlp",
         "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.10.21/yt-dlp_macos",
@@ -25,11 +20,6 @@
     ],
     "darwin-x64": [
       {
-        "name": "ffmpeg",
-        "url": "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-darwin-x64",
-        "sha256": "ebdddc936f61e14049a2d4b549a412b8a40deeff6540e58a9f2a2da9e6b18894"
-      },
-      {
         "name": "yt-dlp",
         "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.10.21/yt-dlp_macos",
         "sha256": "7a6fe71d7d680f1fb0ac18d4949873d77db2859e90017c0f44bd94b23be4ee40"
@@ -43,11 +33,6 @@
     ],
     "win-x64": [
       {
-        "name": "ffmpeg.exe",
-        "url": "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-win32-x64",
-        "sha256": "04e1307997530f9cf2fe35cba2ca7e8875ca91da02f89d6c7243df819c94ad00"
-      },
-      {
         "name": "yt-dlp.exe",
         "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.10.21/yt-dlp.exe",
         "sha256": "33121d192d706e62f684a06f80918e3f3a8ba52ac3a65213b6951c39c7d9f555"
@@ -60,11 +45,6 @@
       }
     ],
     "linux-x64": [
-      {
-        "name": "ffmpeg",
-        "url": "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-linux-x64",
-        "sha256": "e7e7fb30477f717e6f55f9180a70386c62677ef8a4d4d1a5d948f4098aa3eb99"
-      },
       {
         "name": "yt-dlp",
         "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.10.21/yt-dlp_linux",

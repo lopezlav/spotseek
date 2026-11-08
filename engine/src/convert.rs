@@ -260,14 +260,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// Needs ffmpeg on the PATH.
+    /// Needs a full ffmpeg on the PATH (it makes the test files). `SPOTSEEK_TEST_FFMPEG` names the
+    /// ffmpeg that converts and probes (for example the small one of scripts/build-ffmpeg.sh).
     #[tokio::test]
     async fn converts_real_files() {
         if std::process::Command::new("ffmpeg").arg("-version").output().is_err() {
             eprintln!("no ffmpeg: skipped");
             return;
         }
-        let tools = Tools { ffmpeg: "ffmpeg".into() };
+        let ff = std::env::var("SPOTSEEK_TEST_FFMPEG").unwrap_or_else(|_| "ffmpeg".into());
+        let tools = Tools { ffmpeg: ff.clone() };
         let dir = std::env::temp_dir().join(format!("spotseek-conv-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mk = |name: &str, args: &[&str]| {
@@ -282,10 +284,10 @@ mod tests {
         let tags = Tags { artist: "Art".into(), title: "Song".into(), album: "Alb".into() };
         let (f, k) = to_mp3(&tools, &flac, &out, "Art - Song", 320, &tags).await.unwrap();
         assert_eq!(k, 320);
-        let got = probe("ffmpeg", &f).await.unwrap();
+        let got = probe(&ff, &f).await.unwrap();
         assert_eq!((got.codec.as_str(), got.lossless), ("mp3", false));
         assert!((300..=330).contains(&got.kbps), "{got:?}");
-        let got = probe("ffmpeg", &flac).await.unwrap();
+        let got = probe(&ff, &flac).await.unwrap();
         assert_eq!((got.codec.as_str(), got.lossless), ("flac", true));
         let (m, k) = to_mp3(&tools, &mp3, &out, "Art - Song", 320, &tags).await.unwrap();
         assert!(k <= 130, "copied, not raised: {k}");
