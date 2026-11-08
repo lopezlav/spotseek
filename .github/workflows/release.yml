@@ -37,6 +37,12 @@ jobs:
           version = os.environ['GITHUB_REF_NAME'][1:] if os.environ['GITHUB_REF_TYPE'] == 'tag' else os.environ['INPUT_VERSION']
           if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version):
               raise SystemExit('Use a version like 0.1.0 (tag v0.1.0)')
+          # The app offers an update when the newest release is above its own version, so the
+          # programs must carry the release's version.
+          for toml in ('ui/Cargo.toml', 'engine/Cargo.toml'):
+              found = re.search(r'^version = "([^"]+)"', open(toml).read(), re.M).group(1)
+              if found != version:
+                  raise SystemExit(f'{toml} has version {found}; set it to {version} first')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
               out.write(f"version={version}\n")
           PY

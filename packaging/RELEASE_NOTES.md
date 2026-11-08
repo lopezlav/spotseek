@@ -20,6 +20,17 @@
   for the others of the list. Peers that sent you good files are remembered, and the next list
   first looks in what they share. Searches from the last 6 hours are reused. Up to 12 downloads at
   once (YouTube at most 2).
+- **Updates in the app.** When a new version is out, a banner on the paste screen says so.
+  UPDATE downloads it, checks it, and starts the new Spotseek. (This version is the last one to
+  install by hand.)
+- **Install with one command.** macOS and Linux:
+  `curl -fsSL https://github.com/lopezlav/spotseek/releases/latest/download/install.sh | sh`.
+  Windows: `irm https://github.com/lopezlav/spotseek/releases/latest/download/install.ps1 | iex`.
+  Homebrew (`brew install lopezlav/tap/spotseek`) and winget follow.
+- **Intel Macs too** (macOS 12 or later), and a disk image for each Mac. Linux also gets an
+  AppImage: one file, nothing to install.
+- **A smaller download.** ffprobe is gone, and ffmpeg is a small build with only what Spotseek
+  uses.
 - The CLASSIC WINDOW is gone (it was the old Go window).
 
 ## New in 0.2.2

@@ -16,45 +16,64 @@ The app and its download engine are written in Rust. The official downloads bund
 the tools it needs (yt-dlp, ffmpeg and Deno). The only extra thing you
 need is a **Soulseek account** for the Soulseek route.
 
-## Install from the [GitHub releases page](https://github.com/lopezlav/spotseek/releases)
+## Install
 
-### macOS (Apple Silicon)
+### With one command
 
-1. Download `Spotseek-macOS-arm64.zip` from the latest release.
-2. Unzip it and drag **Spotseek** into `/Applications`.
-3. The app is not notarized by Apple. If macOS blocks the first start, use
-   **System Settings → Privacy & Security → Open Anyway**, or run this once:
-   ```bash
-   xattr -dr com.apple.quarantine /Applications/Spotseek.app
-   ```
+macOS (Apple Silicon or Intel) and Linux:
 
-The download is for Apple Silicon Macs (M1 and newer). On an Intel Mac,
-install the tools with Homebrew and build from source (see below).
+```bash
+curl -fsSL https://github.com/lopezlav/spotseek/releases/latest/download/install.sh | sh
+```
 
-### Windows
+macOS with Homebrew:
 
-1. Download `Spotseek-Setup-<version>.exe` from the latest release.
-2. Run it and follow the setup steps. The tools are installed with the app,
-   in the `bin` folder next to the program.
+```bash
+brew install lopezlav/tap/spotseek
+```
 
-Windows may show a blue SmartScreen warning because the app is not signed.
-Choose **More info**, then **Run anyway**.
+Windows (PowerShell):
 
-### Linux (x64)
+```powershell
+irm https://github.com/lopezlav/spotseek/releases/latest/download/install.ps1 | iex
+```
 
-1. Download `Spotseek-linux-x64.tar.gz` from the latest release.
-2. Unpack it and run the install script:
-   ```bash
-   tar -xzf Spotseek-linux-x64.tar.gz
-   ./Spotseek/install.sh
-   ```
-   This puts Spotseek in your app menu and adds a `spotseek` command
-   (`~/.local/share/spotseek`). Or run `./Spotseek/spotseek` without installing.
-   `~/.local/share/spotseek/install.sh --uninstall` removes it.
+or `winget install Lopezlav.Spotseek`.
 
-All tools are included. The system needs what a desktop normally has: a
-graphics driver (Vulkan or OpenGL), ALSA, D-Bus with a secret service (GNOME
-Keyring or KWallet) for the Soulseek password. Built on Ubuntu 22.04.
+The scripts download the file for your computer, check it against the release's
+`SHA256SUMS.txt`, and install it: on macOS in `/Applications`, on Linux in
+`~/.local/share/spotseek` (with an app menu entry and a `spotseek` command), on Windows
+for your user.
+
+### From a file ([releases page](https://github.com/lopezlav/spotseek/releases/latest))
+
+| System | File |
+|---|---|
+| macOS, Apple Silicon (M1 and newer) | `Spotseek-macOS-arm64.dmg` |
+| macOS, Intel | `Spotseek-macOS-x64.dmg` |
+| Windows | `Spotseek-Setup-windows-x64.exe` |
+| Linux | `Spotseek-linux-x64.AppImage`, or `Spotseek-linux-x64.tar.gz` |
+
+- **macOS:** open the disk image and drag Spotseek to Applications. macOS 12 (Monterey)
+  or later. The app is not notarized by Apple, so the first start from a browser download
+  is blocked: use **System Settings → Privacy & Security → Open Anyway**, or run
+  `xattr -dr com.apple.quarantine /Applications/Spotseek.app` once. (The install command and
+  Homebrew do not have this problem.)
+- **Windows:** run the installer. Windows may show a blue SmartScreen warning because the
+  app is not signed: choose **More info**, then **Run anyway**.
+- **Linux, AppImage:** `chmod +x Spotseek-linux-x64.AppImage`, then run it.
+- **Linux, tar.gz:** `tar -xzf Spotseek-linux-x64.tar.gz && ./Spotseek/install.sh`
+  (`~/.local/share/spotseek/install.sh --uninstall` removes it).
+
+All tools are included. Linux needs what a desktop normally has: a graphics driver
+(Vulkan or OpenGL), ALSA, and D-Bus with a secret service (GNOME Keyring or KWallet) for the
+Soulseek password. Built on Ubuntu 22.04.
+
+### Updates
+
+When a new version is out, a banner on the paste screen says so. **UPDATE** downloads it,
+checks it, puts it in place of the old one and starts Spotseek again; **×** hides that version.
+(Homebrew users can also run `brew upgrade`.)
 
 ## Soulseek account
 
