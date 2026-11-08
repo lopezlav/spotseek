@@ -1,5 +1,6 @@
 //! Spotseek: paste a Spotify link, get mp3 files. This is the Rune front end; the work is done
-//! by the Go backend (`spotseek-backend --cli <url> --events`), which it runs as a child process.
+//! by the Rust engine (`spotseek-backend --cli <url> --events`, in `engine/`), which it runs as a
+//! child process.
 //!
 //! `spotseek --snap out.png --scene downloading` renders a screen headless (see `--list-scenes`).
 
@@ -162,7 +163,7 @@ fn scene_details(s: &mut State) {
     t.started = 1_762_500_000.0;
     t.finished = 1_762_500_000.0 + 23.0;
     s.media.fake_wave("demo://2", 213.0, 7);
-    s.media.fake_status(media::Status { path: "demo://2".into(), playing: true, pos: 74.0, dur: 213.0, error: String::new() });
+    s.media.fake_status(media::Status { path: "demo://2".into(), playing: true, pos: 74.0, dur: 213.0, ..Default::default() });
     s.open = Some("c2".into());
 }
 
@@ -275,6 +276,89 @@ fn scene_waiting(s: &mut State) {
     s.last_progress = -42.0;
 }
 
+/// Soulseek files for a demo track: a mix of good, queued, slow and wrong ones.
+fn demo_cands(t: &Track, seed: usize) -> Vec<backend::Cand> {
+    let d = t.duration.max(200);
+    let mk = |id: u32, user: &str, ext: &str, size: u64, br: u32, dur: u32, free: bool, speed: u32, queue: u32, fit: u32, sr: u32, bd: u32, name: &str| backend::Cand {
+        id,
+        user: user.into(),
+        file: format!("{name}.{ext}"),
+        folder: format!("Music/{}", t.artist),
+        ext: ext.into(),
+        size,
+        bitrate: br,
+        duration: dur,
+        sample_rate: sr,
+        bit_depth: bd,
+        free,
+        speed,
+        queue,
+        fit,
+        score: 0.0,
+        eta: (size / speed.max(40_000) as u64) as u32,
+        failed: false,
+    };
+    let name = format!("{:02} - {} - {}", seed % 12 + 1, t.artist, t.title);
+    vec![
+        mk(0, "zwem", "mp3", 8_200_000, 320, d, true, 1_900_000, 0, 100, 0, 0, &name),
+        mk(1, "rodiganhomelab", "flac", 31_400_000, 0, d + 1, true, 2_600_000, 0, 98, 44_100, 16, &name),
+        mk(2, "xXdj_nico", "mp3", 8_100_000, 320, d, false, 3_100_000, 14, 100, 0, 0, &name),
+        mk(3, "hfegetude", "mp3", 4_900_000, 192, d, true, 410_000, 0, 95, 0, 0, &name),
+        mk(4, "djcotter", "mp3", 8_900_000, 320, d + 74, true, 1_200_000, 0, 62, 0, 0, &format!("{} - {} (Extended Mix)", t.artist, t.title)),
+    ]
+}
+
+/// Manual mode: the songs wait for a pick; one is open with its files.
+fn scene_manual(s: &mut State) {
+    demo(s);
+    s.manual = true;
+    s.settings.manual = true;
+    for (i, t) in s.tracks.iter_mut().enumerate() {
+        t.duration = 200 + (i as u32 * 7) % 60;
+        match i {
+            0 | 1 => {
+                t.cands = demo_cands(t, i);
+                t.settled = true;
+                t.cand = Some(0);
+                t.state = TState::Done;
+                t.total = t.cands[0].size;
+                t.bytes = t.total;
+            }
+            2..=9 => {
+                t.cands = demo_cands(t, i);
+                t.settled = i != 3;
+                t.state = TState::Searching;
+            }
+            10..=13 => t.state = TState::Searching,
+            _ => {}
+        }
+    }
+    s.open = Some("c3".into());
+    s.media.fake_wave("demo://none", 1.0, 1);
+}
+
+/// A song that downloads, open: its preview plays the part on disk; the rest is a faint line.
+fn scene_preview(s: &mut State) {
+    scene_downloading(s);
+    let t = &mut s.tracks[21];
+    t.duration = 236;
+    t.cands = demo_cands(t, 21);
+    t.settled = true;
+    t.cand = Some(0);
+    t.total = t.cands[0].size;
+    t.bytes = t.total * 58 / 100;
+    t.part = "demo-part://21".into();
+    t.format = "mp3".into();
+    t.bitrate = 320;
+    t.peer = "zwem".into();
+    t.started = history::now() - 9.0;
+    let (part, bytes, total) = (t.part.clone(), t.bytes, t.total);
+    s.media.set_growing(&part, bytes, total, 236.0);
+    s.media.fake_wave(&part, 236.0, 5);
+    s.media.fake_status(media::Status { path: part, playing: true, pos: 61.0, dur: 236.0, ..Default::default() });
+    s.open = Some("c21".into());
+}
+
 fn scene_failed(s: &mut State) {
     demo(s);
     s.phase = Phase::Failed;
@@ -306,6 +390,8 @@ fn main() {
             ("idle-signed-out", scene_idle_signed_out),
             ("waiting", scene_waiting),
             ("settings", scene_settings),
+            ("manual", scene_manual),
+            ("preview", scene_preview),
         ],
         fonts: FONTS,
         families: ("Inter", "IBM Plex Mono"),

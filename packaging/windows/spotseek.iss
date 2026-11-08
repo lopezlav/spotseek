@@ -3,8 +3,8 @@
 ;   ISCC.exe /DAppVersion=1.2.3 packaging\windows\spotseek.iss
 ; Expected inputs, relative to the repository root:
 ;   build\windows\Spotseek.exe          - the app window (Rune UI)
-;   build\windows\spotseek-backend.exe  - the Go backend that the window runs
-;   build\bin\*                 - bundled tools (sockseek, yt-dlp, ffmpeg, ffprobe)
+;   build\windows\spotseek-backend.exe  - the engine (Rust) that the window runs
+;   build\bin\*                 - bundled tools (yt-dlp, ffmpeg, ffprobe, deno)
 ; Output: build\installer\Spotseek-Setup-<version>.exe
 
 #ifndef AppVersion

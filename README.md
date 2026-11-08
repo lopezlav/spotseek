@@ -1,20 +1,20 @@
 # Spotseek
 
 A small desktop app that downloads music as mp3 files. Paste a public Spotify
-**playlist**, **album**, or **track** link, or **search YouTube Music** and pick
-a result. Tracks download from Soulseek first, the gaps are filled from YouTube
-Music, and every file is normalized to mp3 at the bitrate you choose. FLAC is
-never used.
+**playlist**, **album**, or **track** link. Tracks download from Soulseek first
+(also FLAC and WAV, which are made into mp3), the gaps are filled from YouTube
+Music, and every file becomes an mp3 at the bitrate you choose. The sound never
+goes up: a 192 kbps mp3 stays 192, it is not made a bigger file that sounds the same.
 
 The app opens one simple window: paste a link, watch it search and download,
-then get a poster of the tracks. **CLASSIC WINDOW** (bottom right) opens the
-older window with the YouTube Music search and the My Spotify library.
+then get a poster of the tracks. Click a song to see the files Soulseek found for
+it, pick another one, or listen to it while it downloads.
 
 ![The app window](docs/screenshots/5-downloading.png)
 
-The official downloads bundle all the tools the app needs (sockseek, yt-dlp,
-ffmpeg, ffprobe, and Deno). The only extra thing you need is a **Soulseek account** for
-the Soulseek route.
+The app and its download engine are written in Rust. The official downloads bundle
+the tools it needs (yt-dlp, ffmpeg, ffprobe, and Deno). The only extra thing you
+need is a **Soulseek account** for the Soulseek route.
 
 ## Install from the [GitHub releases page](https://github.com/lopezlav/spotseek/releases)
 
@@ -54,21 +54,16 @@ Choose **More info**, then **Run anyway**.
 
 All tools are included. The system needs what a desktop normally has: a
 graphics driver (Vulkan or OpenGL), ALSA, D-Bus with a secret service (GNOME
-Keyring or KWallet) for the Soulseek password, and ICU. Built on Ubuntu 22.04.
+Keyring or KWallet) for the Soulseek password. Built on Ubuntu 22.04.
 
 ## Soulseek account
 
-Downloads try Soulseek first, through the bundled sockseek tool. Soulseek
-needs an account:
+Downloads try Soulseek first. Spotseek has its own Soulseek client, so no other
+Soulseek program is needed. At the first launch Spotseek asks for an account; Soulseek
+has no sign-up page, so a new name and password there create the account.
 
-1. Install the free [Soulseek](https://www.slsknet.org/news/) client or
-   [Nicotine+](https://nicotine-plus.org/) once and create an account.
-2. In Spotseek, open **Download**, open the **Soulseek account** section, and
-   type your username and password.
-
-You do not need the official Soulseek app after that; sockseek does the
-downloading. Without an account, every track falls back to YouTube Music, and
-the **YouTube** tab works without any account at all.
+An account in `~/.config/sockseek/sockseek.conf` (lines `username = …` and
+`password = …`) also works. Without an account, every track comes from YouTube Music.
 
 ## Requirements
 
@@ -76,43 +71,68 @@ Nothing must be installed when you use the official downloads. If you build
 the app yourself, these tools must be on the machine, because the self-built
 app has no bundled copies:
 
-- **Sockseek** - the Soulseek downloader. A Soulseek account must be set in
-  `~/.config/sockseek/sockseek.conf` (or typed in the app).
-- **yt-dlp** - for the YouTube Music search and fallback.
-- **ffmpeg** and **ffprobe** - for the mp3 normalization.
+- **yt-dlp** - for the YouTube Music fallback.
+- **ffmpeg** and **ffprobe** - for the mp3 conversion.
 - **Deno** - JavaScript runtime needed by yt-dlp for full YouTube support.
 
 On macOS:
 
 ```bash
 brew install yt-dlp ffmpeg deno
-# Sockseek: download a release, or build the sockseek repo
 ```
 
-## Search YouTube Music (no account)
-
-Open **CLASSIC WINDOW** from the bottom right of the app. Its **YouTube** tab searches YouTube Music directly. Type a song, an artist,
-or a few words from the title, press **Search**, and download the result you
-pick. Nothing is read from Spotify and no account is needed.
-
-## The app window (Rune UI)
+## The app window (Rune UI) and the engine
 
 The window is `ui/`, written in Rust with [Rune](https://github.com/anomalyco/rune).
-It does no downloading itself: it runs the Go program as its backend,
-`spotseek-backend --cli <url> -o <dir> --events --ask`. The backend writes one
-JSON event per line (see `internal/pipeline/events.go`) and stops when its stdin
-closes. With `--ask`, it waits after the track list for one stdin line,
-`{"only":[0,2,5]}`, and downloads only those tracks. The window looks for `spotseek-backend` next to its own program; set
+It does no downloading itself: it runs the engine, `engine/` (Rust, the program
+`spotseek-backend`), as a child process:
+`spotseek-backend --cli <url> -o <dir> --events --ask [--manual]`. The engine writes one
+JSON event per line (see `engine/src/events.rs`) and stops when its stdin closes. Stdin
+lines it reads: `{"only":[0,2,5]}` after the track list (with `--ask`), `{"stop":true}`
+(stop downloading, keep and convert what is done), and `{"pick":{"i":3,"id":7}}` or
+`{"pick":{"i":3,"yt":true}}` (download that file for track 3, or take it from YouTube
+Music). The window looks for `spotseek-backend` next to its own program; set
 `SPOTSEEK_BACKEND` to use another path.
+
+How the engine works (`engine/src`):
+
+- `slsk/` - the Soulseek client: sign-in, searches (at most 34 every 220 seconds, the
+  server's limit), peer connections (direct, or through the server when a peer cannot
+  reach us), and downloads.
+- `rank.rs` - for each track, every file that peers send is scored: is it the same song
+  (title and artist in the name, the length against Spotify's, no "remix" or "live" that
+  the title does not have), is the sound good enough (lossless, or an mp3 at or above the
+  bitrate you chose), and will it come fast (free upload slot, queue, the peer's speed,
+  the time the file takes). The search stops early when there are enough good files.
+- `pipeline.rs` - all tracks at the same time (four downloads at once): search, take the
+  best file, and when it does not start in 15 seconds, stalls, or is much too slow while
+  there are other files, take the next one. After six files, or when Soulseek has none,
+  YouTube Music. Each track is converted the moment it lands.
+- `convert.rs` - the sound never goes up: an mp3 at or below the bitrate you chose is
+  copied as it is; a better mp3, FLAC, WAV or AIFF is encoded down to it; other lossy
+  formats (YouTube's opus, AAC) are encoded at no more than their own bitrate.
+- `spotify.rs`, `youtube.rs` - the public Spotify pages, and yt-dlp.
+
+In the window:
 
 - The headline and the liquid-metal progress bar are our own shader
   (`ui/src/liquid.wgsl`) at Rune effect slots. The headline words are signed
   distance fields (`ui/src/sdf.rs`), so one word can flow into the next.
+- **Files: AUTO or I PICK** (bottom of the paste screen, and in the settings). With AUTO, the
+  engine takes the best file. With I PICK, each song waits: click it to see the files Soulseek
+  found, best first, each with its format and quality, size, length (in red when it is not
+  Spotify's), free slot or queue, the peer's speed and the time it should take. A green dot
+  means the right song from a free peer; yellow, a wait or a doubt; red, maybe another song.
+  "Best file for all" picks the first one for every song. In both modes you can pick another
+  file while one downloads, or "use YouTube Music".
+- **Listen while it downloads.** Open a song that downloads (mp3, FLAC or WAV from Soulseek):
+  the player shows what is on disk; the part that is not there yet is a faint line. Play and
+  seek only go as far as the download; at its end the player waits and goes on by itself, so
+  it never plays silence. When the mp3 is ready, it goes on with the mp3.
 - At launch, the window asks for a Soulseek account until there is one (it can be skipped:
-  then everything comes from YouTube Music). Soulseek has no sign-up page; signing in with a new
-  name creates the account, as Nicotine+ does. `spotseek-backend --cli --check-login --user NAME`
+  then everything comes from YouTube Music). `spotseek-backend --cli --check-login --user NAME`
   (password on stdin) signs in once and prints `{"ok":…}`. The password is kept in the macOS
-  Keychain or the Windows Credential Manager; an account in `sockseek.conf` also works.
+  Keychain, the Windows Credential Manager, or the Linux secret service.
 - The texts are in English and Spanish, by the system language (`SPOTSEEK_LANG=es` to test).
 - Click a track to open its details: cover, source, peer, quality, size,
   average speed, time, and a player (space plays and pauses).
@@ -123,15 +143,18 @@ closes. With `--ask`, it waits after the track list for one stdin line,
 - Everything is in the user's config folder (`~/Library/Application
   Support/Spotseek` on macOS, `%APPDATA%\Spotseek` on Windows):
   `settings.json`, `history.json` (every download, by link), `covers/`, and
-  `logs/` (each backend run, line by line; the last 40 are kept). The Soulseek
-  password is never saved. `SPOTSEEK_CONFIG_DIR` sets another folder.
+  `logs/` (each engine run, line by line; the last 40 are kept). The Soulseek
+  password is never saved in a file. `SPOTSEEK_CONFIG_DIR` sets another folder.
 
 Development helpers:
 
 ```bash
+cd engine && cargo test --release && cd ..
+# One run from the command line (text output; add --events for the JSON events):
+engine/target/release/spotseek-backend --cli "<spotify-url>" -o /tmp/out --limit 2
 cd ui
 cargo test --release
-# Render one screen headless (see --list-scenes: downloading, details, have, history, …)
+# Render one screen headless (see --list-scenes: downloading, details, manual, preview, …)
 cargo run --release -- --snap out.png --scene downloading --size 1100x780 --scale 2
 # A scripted download with no backend and no network, recorded as video
 SPOTSEEK_DEMO=1 cargo run --release -- --script scripts/demo.json --video demo.mp4 --size 1100x780
@@ -139,16 +162,15 @@ SPOTSEEK_DEMO=1 cargo run --release -- --script scripts/demo.json --video demo.m
 
 ## Build on macOS
 
-Rust (stable), Go, and the Xcode command line tools are needed.
+Rust (stable) and the Xcode command line tools are needed.
 
 ```bash
-ui/package-mac.sh            # builds ui/target/Spotseek.app
+ui/package-mac.sh            # builds ui/target/Spotseek.app (window and engine)
 ui/package-mac.sh --install  # also replaces /Applications/Spotseek.app (old app to the Trash)
 ```
 
 To bundle the tools into the .app (Python 3 is needed on the build machine
-only; also copy a self-contained sockseek build into `build/bin`), run this
-before `package-mac.sh`:
+only), run this before `package-mac.sh`:
 
 ```bash
 scripts/fetch-tools.sh build/bin darwin-arm64
@@ -156,27 +178,19 @@ scripts/fetch-tools.sh build/bin darwin-arm64
 
 ## Build on Windows
 
-Fyne uses cgo and OpenGL, so a Windows `.exe` **cannot be cross-compiled from
-macOS**. Build it on a Windows machine:
+Build on a Windows machine with Rust (stable, MSVC toolchain), and put yt-dlp,
+ffmpeg and ffprobe on the PATH (or in a `bin` folder next to the program):
 
-1. Install Go, a C compiler (MSYS2 mingw-w64 gcc, or TDM-GCC), and Rust
-   (stable, MSVC toolchain).
-2. Install the tools:
-   - Sockseek (Windows release)
-   - `yt-dlp.exe`
-   - ffmpeg (add `ffmpeg.exe` and `ffprobe.exe` to PATH)
-3. Build the backend and the window, and put them in one folder:
-    ```bat
-    go build -o spotseek-backend.exe .
-    cd ui && cargo build --release
-    copy target\release\spotseek.exe ..\Spotseek.exe
-    ```
-    Keep `spotseek-backend.exe` next to `Spotseek.exe`.
+```bat
+cd engine && cargo build --release && cd ..
+cd ui && cargo build --release && cd ..
+copy ui\target\release\spotseek.exe Spotseek.exe
+copy engine\target\release\spotseek-backend.exe spotseek-backend.exe
+```
 
-The code already handles Windows: the startup `PATH` fix adds the WinGet and
-scoop folders, and **Open folder** uses `explorer`. Release builds test silent installation, tool startup, MP3 encoding, and
-uninstallation on a Windows runner. Interactive desktop use still needs a
-human check.
+Keep `spotseek-backend.exe` next to `Spotseek.exe`. Release builds test silent
+installation, tool startup, MP3 encoding, and uninstallation on a Windows runner.
+Interactive desktop use still needs a human check.
 
 ## Releases
 
@@ -186,8 +200,8 @@ GitHub Actions builds the downloads whenever a tag like `v1.2.3` is pushed:
 - `Spotseek-Setup-<version>.exe` - the Windows installer with all tools bundled.
 - `Spotseek-linux-x64.tar.gz` - the Linux app with all tools bundled and an install script.
 
-Both contain the app window (the Rune UI, `Spotseek.app/Contents/MacOS/spotseek`
-or `Spotseek.exe`) and the Go backend next to it (`spotseek-backend`).
+Each contains the app window (the Rune UI, `Spotseek.app/Contents/MacOS/spotseek`
+or `Spotseek.exe`) and the engine next to it (`spotseek-backend`).
 
 The workflow also runs manually from the Actions tab and uploads the same
 files as build artifacts. Both platform builds, tests, and smoke tests must
@@ -201,89 +215,22 @@ gh workflow run release.yml --ref main -f version=0.1.0 -f draft_release=true
 # Alternatively, pushing a v0.1.0 tag also builds a draft.
 ```
 
-The workflow pins sockseek to a source commit. Downloaded tools are pinned by
-version and SHA-256 in `packaging/tools.json`; changing a tool requires updating
-its checksum and testing a new manual build. CI also runs tests and vet on
-macOS and Windows for pushes and pull requests, for the Go code and for the
-app window.
+Downloaded tools are pinned by version and SHA-256 in `packaging/tools.json`;
+changing a tool requires updating its checksum and testing a new manual build. CI
+runs the tests of the engine, the app window and the Go Mixxx server on macOS,
+Windows and Linux for pushes and pull requests.
 
 Spotseek's own code is licensed under [MIT](LICENSE).
 See [third-party notices](THIRD_PARTY_NOTICES.md) for bundled licenses and
 source references. These are also included inside both installers.
 
-## Connect Spotify (read-only)
+## The Go program: the Mixxx server
 
-The **My Spotify** tab shows your playlists, albums, and liked songs, and
-downloads them with one click. This uses the official Spotify API, read-only.
-
-Setup, once:
-
-1. Open https://developer.spotify.com/dashboard and create an app.
-2. In the app settings, add this exact Redirect URI:
-   `http://127.0.0.1:48721/callback`
-   (`localhost` is not allowed by Spotify; the loopback IP is.)
-3. Copy the **Client ID** (no secret is needed; the app uses PKCE).
-4. In the app, open **My Spotify**, paste the Client ID, and click
-   **Connect Spotify**.
-5. Log in in the browser. The app saves only a refresh token, in the macOS
-   Keychain (Windows Credential Manager on Windows).
-
-Scopes requested, all read-only:
-`playlist-read-private playlist-read-collaborative user-library-read user-read-private`.
-The app never writes to your Spotify account.
-
-Spotify requires the owner of the developer app to have Premium. This is a
-Spotify rule, not an app setting.
-
-## Command line (for testing)
-
-```bash
-Spotseek.app/Contents/MacOS/spotseek-backend --cli "<spotify-url>" -o <dir>
-```
-
-Options: `--bitrate 320`, `--no-fallback`, `--limit N`, `--extract-only`,
-`--events` (JSON events on stdout, used by the app window), `--user NAME --pass-stdin`.
-
-Add `--timings` to log JSON `TIMING` records and include stage durations in
-`_report.json`. Server downloads record these timings in each job's log.
-Durations cover Soulseek process startup/login, search and peer selection,
-transfer attempts, missing-file checks, both YouTube searches, candidate
-metadata and ranking, each yt-dlp retry, audio transfer, MP3 encoding,
-metadata/thumbnail processing, and final probing/copying/transcoding.
-Parent totals include their child stages; do not add both together.
-Soulseek and yt-dlp subprocess stages use observed output boundaries, so a
-transfer interval can include connection or queue time. First-progress time
-is recorded when progress can be attributed to a track.
-
-For repeated, isolated measurements of several tracks, save a JSON array
-containing `id`, `artist`, `title`, and `duration` (seconds), then run:
-
-```bash
-go run ./cmd/download-bench --tracks tracks.json --out /tmp/spotseek-bench-new --repeat 3
-```
-
-The output directory must be new. Each trial gets its own work and audio
-folders, a timestamped `timeline.log`, and a `result.json`. `results.json`
-collects completed trials even if a later trial is interrupted. Downloads
-run sequentially using the configured bitrate, executables, credentials,
-matching threshold, and Soulseek deadline. Supplied metadata models server
-downloads; use `--fetch-metadata` to include public Spotify page extraction.
-`--mode direct-youtube` skips Soulseek as an explicitly forced control;
-`--mode both` runs both routes. Automatic runs retain the real fallback rules.
-
-Fallback search reads structured results and discards channel/album browse
-entries. YouTube Music and YouTube searches run together. Full metadata is
-checked in groups of three, with at most four search processes across jobs.
-Flat metadata chooses the initial shortlist; final scoring still uses full
-metadata. More candidates are checked unless the best score reaches the
-matcher's maximum (12); earlier entries are still checked to preserve ties.
-Metadata checks retain a shared 180-second deadline.
-
-For server jobs and single-track CLI runs, fallback search starts alongside
-Soulseek. YouTube audio is downloaded only after Soulseek misses the track.
-Pending speculative search is canceled when Soulseek succeeds or the job is
-canceled. Multi-track CLI and album runs search YouTube only for missing tracks.
-Timing spans can overlap; pipeline elapsed time measures the real wall time.
+The Go code in this repository (`main.go`, `internal/`, `cmd/`) is now only the local
+server for the Mixxx fork (`spotseek-app serve`, below) and its old Fyne window. The app
+does not use it, and the releases do not include it. Porting the server to Rust is the
+next step. The server's Spotify login (read-only, PKCE) needs a Spotify developer app with
+the Redirect URI `http://127.0.0.1:48721/callback`.
 
 <!-- AI-assisted documentation begins. -->
 ## Mixxx server and catalogue search
@@ -326,12 +273,9 @@ Checks: `go test ./...`, `go vet ./...`, and
 
 ## Layout
 
-- `internal/spotify` - reads playlist, album, and track metadata from public
-  Spotify pages. No login or developer app needed.
-- `internal/ytdlp` - YouTube Music search, ranking, and download.
-- `internal/pipeline` - runs Sockseek, finds missing tracks, runs the fallback,
-  and normalizes to mp3.
-- `scripts` - downloads the bundled tools for packaging.
-- `packaging/windows` - the Inno Setup script for the Windows installer.
-- `main.go` - the classic Fyne window, the CLI mode, and the server.
+- `engine` - the download engine (Rust): Soulseek client, ranking, conversion,
+  Spotify and YouTube Music. It is `spotseek-backend`.
+- `scripts` - downloads the bundled tools for packaging, and the smoke test.
+- `packaging` - the Windows installer script, the Linux install script, the release notes.
+- `main.go`, `internal`, `cmd` - the Go Mixxx server (not in the app).
 - `ui` - the app window (Rust, Rune).

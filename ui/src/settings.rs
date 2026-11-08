@@ -15,6 +15,8 @@ pub struct Settings {
     pub user: String,
     /// "auto" (the system language), "en" or "es".
     pub lang: String,
+    /// The user picks the Soulseek file for each track (else the best one is taken).
+    pub manual: bool,
 }
 
 pub fn home() -> PathBuf {
@@ -29,6 +31,7 @@ impl Default for Settings {
             fallback: true,
             user: String::new(),
             lang: "auto".into(),
+            manual: false,
         }
     }
 }

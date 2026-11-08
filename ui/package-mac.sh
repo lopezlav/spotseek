@@ -1,5 +1,5 @@
 #!/bin/sh
-# Builds Spotseek.app with the Rune UI as the app and the Go backend next to it,
+# Builds Spotseek.app with the Rune UI as the app and the engine (spotseek-backend) next to it,
 # in the same layout as the release build (.github/workflows/release.yml).
 # If build/bin holds the tools (scripts/fetch-tools.py), they go in
 # Contents/Resources/bin; if build/notices exists, it goes in Contents/Resources/licenses.
@@ -12,15 +12,15 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 VERSION=${VERSION:-2.0.0}
 OUT="$ROOT/ui/target/Spotseek.app"
 
-echo "Building the Go backend..."
-(cd "$ROOT" && go build -trimpath -o "$ROOT/ui/target/release/spotseek-backend" .)
+echo "Building the engine..."
+(cd "$ROOT/engine" && cargo build --release)
 echo "Building the Rune UI..."
 (cd "$ROOT/ui" && cargo build --release)
 
 rm -rf "$OUT"
 mkdir -p "$OUT/Contents/MacOS" "$OUT/Contents/Resources"
 cp "$ROOT/ui/target/release/spotseek" "$OUT/Contents/MacOS/spotseek"
-cp "$ROOT/ui/target/release/spotseek-backend" "$OUT/Contents/MacOS/spotseek-backend"
+cp "$ROOT/engine/target/release/spotseek-backend" "$OUT/Contents/MacOS/spotseek-backend"
 if [ -d "$ROOT/build/bin" ]; then cp -R "$ROOT/build/bin" "$OUT/Contents/Resources/bin"; fi
 if [ -d "$ROOT/build/notices" ]; then cp -R "$ROOT/build/notices" "$OUT/Contents/Resources/licenses"; fi
 

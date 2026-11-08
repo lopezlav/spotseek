@@ -26,7 +26,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.meta.outputs.version }}
-      sockseek: ${{ steps.meta.outputs.sockseek }}
     steps:
       - uses: actions/checkout@v4
       - id: meta
@@ -38,9 +37,8 @@ jobs:
           version = os.environ['GITHUB_REF_NAME'][1:] if os.environ['GITHUB_REF_TYPE'] == 'tag' else os.environ['INPUT_VERSION']
           if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version):
               raise SystemExit('Use a version like 0.1.0 (tag v0.1.0)')
-          tools = json.load(open('packaging/tools.json'))
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
-              out.write(f"version={version}\nsockseek={tools['versions']['sockseek']}\n")
+              out.write(f"version={version}\n")
           PY
 
   build:
@@ -55,26 +53,20 @@ jobs:
           - name: macOS (Apple Silicon)
             runner: macos-latest
             platform: darwin-arm64
-            rid: osx-arm64
             artifact: Spotseek-macOS-arm64
           - name: Windows (x64)
             runner: windows-latest
             platform: win-x64
-            rid: win-x64
             artifact: Spotseek-Setup-windows
           # The oldest supported Ubuntu, so the build runs on older systems too (glibc 2.35).
           - name: Linux (x64)
             runner: ubuntu-22.04
             platform: linux-x64
-            rid: linux-x64
             artifact: Spotseek-linux-x64
     env:
       APP_VERSION: ${{ needs.prepare.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -82,48 +74,29 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          # Audio (player), D-Bus (password store, file dialog), Wayland and X11 (window),
-          # OpenGL and X11 headers (the classic Fyne window in the backend).
+          # Audio (player), D-Bus (password store, file dialog), Wayland and X11 (window).
           sudo apt-get install -y --no-install-recommends libasound2-dev libdbus-1-dev pkg-config \
             libwayland-dev libxkbcommon-dev libgl1-mesa-dev xorg-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: ui
-      - name: Test and vet
+          workspaces: |
+            ui
+            engine
+      - name: Test and build the engine (spotseek-backend)
         shell: bash
+        working-directory: engine
         run: |
-          go test -tags ci ./...
-          go vet -tags ci ./...
+          cargo test --release --locked
+          cargo build --release --locked
       - name: Test and build the app window (Rune UI)
         shell: bash
         working-directory: ui
         run: |
           cargo test --release --locked
           cargo build --release --locked
-      - name: Install fyne CLI
-        if: runner.os == 'macOS'
-        run: go install fyne.io/fyne/v2/cmd/fyne@v2.8.1
       - name: Download verified bundled tools
         run: python scripts/fetch-tools.py build/bin ${{ matrix.platform }}
-      - name: Check out pinned sockseek
-        uses: actions/checkout@v4
-        with:
-          repository: fiso64/sockseek
-          ref: ${{ needs.prepare.outputs.sockseek }}
-          path: sockseek
-          persist-credentials: false
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 10.0.x
-      - name: Build sockseek
-        shell: bash
-        run: |
-          dotnet restore sockseek/Sockseek.sln
-          dotnet publish sockseek/Sockseek.Cli -c Release -f net10.0 -r ${{ matrix.rid }} \
-            -o "$PWD/build/bin" -p:PublishSingleFile=true -p:PublishTrimmed=false \
-            -p:DebugType=embedded --self-contained true
-          rm -f build/bin/*.pdb
       - name: Collect third-party notices
         run: python scripts/collect-notices.py build/notices ${{ matrix.platform }}
       - name: Package and test macOS app
@@ -131,16 +104,10 @@ jobs:
         shell: bash
         run: |
           test "$(uname -m)" = arm64
-          "$(go env GOPATH)/bin/fyne" package -os darwin -name Spotseek \
-            -appID io.github.lopezlav.spotseek -appVersion "$APP_VERSION" -appBuild "$GITHUB_RUN_NUMBER"
-          # The app window (Rune UI) is the app; the Go program runs next to it as its backend.
-          mv Spotseek.app/Contents/MacOS/spotseek-app Spotseek.app/Contents/MacOS/spotseek-backend
-          cp ui/target/release/spotseek Spotseek.app/Contents/MacOS/spotseek
-          plutil -replace CFBundleExecutable -string spotseek Spotseek.app/Contents/Info.plist
-          plutil -replace LSMinimumSystemVersion -string 13.0 Spotseek.app/Contents/Info.plist
-          cp -R build/bin Spotseek.app/Contents/Resources/bin
-          cp -R build/notices Spotseek.app/Contents/Resources/licenses
-          codesign --force --deep --sign - Spotseek.app
+          # The app window (Rune UI) is the app; the engine runs next to it as its backend.
+          # package-mac.sh builds both, adds build/bin and build/notices, and signs ad hoc.
+          VERSION="$APP_VERSION" ui/package-mac.sh
+          mv ui/target/Spotseek.app Spotseek.app
           codesign --verify --deep --strict Spotseek.app
           python scripts/smoke-test.py Spotseek.app/Contents/Resources/bin Spotseek.app/Contents/MacOS/spotseek Spotseek.app/Contents/MacOS/spotseek-backend
           mkdir -p build/artifacts
@@ -149,12 +116,11 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          # The app window (Rune UI) is Spotseek.exe. The Go program is its backend: a
+          # The app window (Rune UI) is Spotseek.exe. The engine is its backend: a
           # console program that the window starts with a hidden console, so the
-          # tools it runs (sockseek, yt-dlp, ffmpeg) do not open windows.
+          # tools it runs (yt-dlp, ffmpeg) do not open windows.
           New-Item -ItemType Directory -Force -Path build/windows | Out-Null
-          go build -trimpath -o build/windows/spotseek-backend.exe .
-          if ($LASTEXITCODE -ne 0) { throw "Backend build failed" }
+          Copy-Item engine/target/release/spotseek-backend.exe build/windows/spotseek-backend.exe
           Copy-Item ui/target/release/spotseek.exe build/windows/Spotseek.exe
       - name: Build and test Windows installer
         if: runner.os == 'Windows'
@@ -182,7 +148,7 @@ jobs:
           # A folder with the app window, the backend, the tools and an install script.
           app=build/linux/Spotseek
           mkdir -p "$app"
-          go build -trimpath -o "$app/spotseek-backend" .
+          cp engine/target/release/spotseek-backend "$app/spotseek-backend"
           cp ui/target/release/spotseek "$app/spotseek"
           cp -R build/bin "$app/bin"
           cp -R build/notices "$app/licenses"

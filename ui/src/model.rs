@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use rune::{AppHandle, TextEdit};
 
 use crate::account::{self, Account, Check};
-use crate::backend::{self, Event, Run};
+use crate::backend::{self, Cand, Event, Run};
 use crate::i18n::Lang;
 use crate::gfx;
 use crate::history::{self, History, Library, SavedTrack, Session};
@@ -89,11 +89,30 @@ pub struct Track {
     pub finished: f64,
     /// Part of the backend run that is going on.
     pub in_run: bool,
+    /// The Soulseek files found for it, best first.
+    pub cands: Vec<Cand>,
+    /// No more candidates will come.
+    pub settled: bool,
+    /// The candidate it downloads (or downloaded).
+    pub cand: Option<u32>,
+    /// The file that grows while it downloads (for the preview player), and its format.
+    pub part: String,
+    pub format: String,
 }
 
 impl Track {
     pub fn new(artist: &str, title: &str) -> Track {
         Track { artist: artist.into(), title: title.into(), ..Default::default() }
+    }
+
+    /// Manual mode: the files are there and the track waits for the user's pick.
+    pub fn choosing(&self, manual: bool) -> bool {
+        manual && self.in_run && self.state == TState::Searching && !self.cands.is_empty() && self.cand.is_none()
+    }
+
+    /// The preview can play its file while it downloads (the formats the player reads).
+    pub fn previewable(&self) -> bool {
+        !self.part.is_empty() && matches!(self.format.as_str(), "mp3" | "flac" | "wav" | "aif" | "aiff")
     }
 
     /// How far this track is, 0 to 1.
@@ -153,6 +172,8 @@ pub struct Detail {
     pub moved: bool,
     /// Something went wrong (not found, moved): the status shows in red.
     pub bad: bool,
+    /// `path` is the file that is still downloading (a preview), not the mp3.
+    pub preview: bool,
 }
 
 impl Detail {
@@ -190,6 +211,7 @@ impl Detail {
             cover: cover.to_string(),
             moved,
             bad: moved || t.state != "done",
+            preview: false,
         }
     }
 }
@@ -224,7 +246,7 @@ pub struct State {
     pub login_error: String,
     /// The sign-in window that opens at launch while there is no account.
     pub login_open: bool,
-    /// Sockseek could not sign in during a run (wrong password, account in use elsewhere).
+    /// The engine could not sign in to Soulseek (wrong password, account in use elsewhere).
     pub login_problem: bool,
     pub lang: Lang,
     pub run: Option<Run>,
@@ -264,6 +286,8 @@ pub struct State {
     pub last_progress: f64,
     /// The last run was stopped early: tracks it did not get are "not downloaded", not missing.
     pub stopped_early: bool,
+    /// The run waits for the user to pick a file for each track.
+    pub manual: bool,
     pub media: Media,
 }
 
@@ -328,6 +352,7 @@ impl State {
             stopping: false,
             last_progress: 0.0,
             stopped_early: false,
+            manual: false,
             media,
         }
     }
@@ -413,6 +438,7 @@ impl State {
             },
             ask: true,
             skip_soulseek: self.account == Account::None,
+            manual: self.settings.manual,
             cover_out: if self.persist && self.cover.is_empty() { config_dir().join("covers").join(format!("{}.jpg", self.session_id)).to_string_lossy().into_owned() } else { String::new() },
             log: self.persist.then(|| config_dir().join("logs").join(format!("{stamp}.log"))),
         };
@@ -511,6 +537,7 @@ impl State {
         self.stopping = false;
         self.login_problem = false;
         self.stopped_early = false;
+        self.manual = false;
     }
 
     pub fn apply(&mut self, e: Event) {
@@ -525,8 +552,22 @@ impl State {
                 self.last_progress = self.now;
                 let Some(t) = e.i.and_then(|i| self.tracks.get_mut(i)) else { return };
                 let Some(st) = TState::from(&e.state) else { return };
-                if st == TState::Downloading && t.state != TState::Downloading {
+                if st == TState::Downloading && (t.state != TState::Downloading || e.cand != t.cand) {
                     t.bytes = 0;
+                }
+                if e.cand.is_some() {
+                    t.cand = e.cand;
+                }
+                if st == TState::Downloading {
+                    t.part = e.path.clone();
+                    t.format = e.format.clone();
+                    let secs = t.cands.iter().find(|c| Some(c.id) == t.cand).map(|c| c.duration).filter(|d| *d > 0).unwrap_or(t.duration) as f64;
+                    self.media.set_growing(&t.part, 0, e.total, secs);
+                }
+                if st == TState::Searching && t.state == TState::Downloading {
+                    // That file failed; it goes on with another.
+                    t.cand = None;
+                    t.part.clear();
                 }
                 if matches!(st, TState::Downloading | TState::YtDownload) && t.started == 0.0 {
                     t.started = history::now();
@@ -549,9 +590,13 @@ impl State {
                 }
                 if st == TState::Done {
                     t.finished = history::now();
+                    if !t.part.is_empty() && t.total > 0 {
+                        let secs = self.media.growing(&t.part).map_or(t.duration as f64, |g| g.secs);
+                        self.media.set_growing(&t.part, t.total, t.total, secs);
+                    }
                     if t.total > 0 && !t.youtube {
-                        // Sockseek sends progress at most twice a second for all files
-                        // together; the end of a file often arrives only with "done".
+                        // Progress comes a few times a second; the end of a file can
+                        // arrive only with "done".
                         if t.total > t.bytes {
                             self.speed_bytes += t.total - t.bytes;
                         }
@@ -569,10 +614,25 @@ impl State {
                 if e.total > 0 {
                     t.total = e.total;
                 }
+                if !t.part.is_empty() {
+                    let secs = self.media.growing(&t.part).map_or(t.duration as f64, |g| g.secs);
+                    self.media.set_growing(&t.part, t.bytes, t.total, secs);
+                }
+            }
+            "candidates" => {
+                self.last_progress = self.now;
+                let Some(t) = e.i.and_then(|i| self.tracks.get_mut(i)) else { return };
+                t.cands = e.cands.unwrap_or_default();
+                t.settled = e.settled;
             }
             "file" => {
                 if let Some(t) = e.i.and_then(|i| self.tracks.get_mut(i)) {
+                    // A preview that plays goes on with the mp3.
+                    self.media.swap(&t.part, &e.path);
                     t.path = e.path;
+                    if e.bitrate > 0 {
+                        t.bitrate = e.bitrate;
+                    }
                 }
             }
             "convert" => self.convert = (e.done, e.count),
@@ -615,6 +675,7 @@ impl State {
         } else {
             self.name = e.name;
             self.kind = e.kind;
+            self.manual = e.manual;
             self.tracks = e
                 .tracks
                 .iter()
@@ -873,14 +934,14 @@ impl State {
         self.next_step();
     }
 
-    /// Seconds Soulseek has sent nothing while tracks still wait to be searched, or None. Sockseek
+    /// Seconds Soulseek has sent nothing while tracks still wait to be searched, or None. Soulseek
     /// allows only 34 searches every 220 s (more gets the account banned for 30 minutes), so long
-    /// lists pause; it does not report the pause, so it is seen from the silence.
+    /// lists pause; the pause is seen from the silence.
     pub fn soulseek_wait(&self) -> Option<f64> {
         if self.phase != Phase::Running || self.stopping || self.stage != "soulseek" || self.downloading() {
             return None;
         }
-        if !self.tracks.iter().any(|t| t.in_run && matches!(t.state, TState::Pending | TState::Searching)) {
+        if !self.tracks.iter().any(|t| t.in_run && matches!(t.state, TState::Pending | TState::Searching) && !t.choosing(self.manual)) {
             return None;
         }
         let quiet = self.now - self.last_progress;
@@ -898,6 +959,52 @@ impl State {
         if let (true, Some((left, _))) = (focused, self.countdown.as_mut()) {
             *left = left.max(4.0);
         }
+    }
+
+    // ---------------------------------------------------------------- picks
+
+    /// Downloads candidate `cand` for track `i`, or (None) takes it from YouTube Music.
+    pub fn pick(&mut self, i: usize, cand: Option<u32>) {
+        let Some(t) = self.tracks.get_mut(i) else { return };
+        if !t.in_run || matches!(t.state, TState::Done | TState::Missing | TState::YtSearch | TState::YtDownload) {
+            return;
+        }
+        if cand.is_some() && cand == t.cand {
+            return;
+        }
+        if let Some(r) = self.run.as_mut() {
+            r.pick(i, cand);
+            // Shown at once; the backend's events follow.
+            t.cand = cand;
+            if cand.is_none() {
+                t.state = TState::Failed;
+            }
+        }
+    }
+
+    /// Manual mode: the best file for every track that waits for a pick.
+    pub fn pick_best_for_all(&mut self) {
+        let picks: Vec<(usize, u32)> = self
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.choosing(self.manual))
+            .filter_map(|(i, t)| t.cands.iter().find(|c| !c.failed).map(|c| (i, c.id)))
+            .collect();
+        for (i, id) in picks {
+            self.pick(i, Some(id));
+        }
+    }
+
+    pub fn save_settings(&mut self) {
+        if self.persist {
+            self.settings.save();
+        }
+    }
+
+    /// Tracks that wait for a pick.
+    pub fn choosing(&self) -> usize {
+        self.tracks.iter().filter(|t| t.choosing(self.manual)).count()
     }
 
     // ---------------------------------------------------------------- details
@@ -921,6 +1028,7 @@ impl State {
         let pct = if t.total > 0 { t.bytes * 100 / t.total } else { 0 };
         let l = self.lang;
         let status = match t.state {
+            _ if t.choosing(self.manual) => l.t("PICK A FILE BELOW", "ELEGÍ UN ARCHIVO ABAJO").into(),
             TState::Pending => l.t("WAITING", "ESPERANDO").into(),
             TState::Searching => l.t("SEARCHING SOULSEEK", "BUSCANDO EN SOULSEEK").into(),
             TState::Downloading => format!("{} {pct}%", l.t("DOWNLOADING", "DESCARGANDO")),
@@ -933,8 +1041,18 @@ impl State {
             TState::Queued => l.t("WILL DOWNLOAD AGAIN", "SE VA A DESCARGAR DE NUEVO").into(),
             TState::Skipped => l.t("ALREADY IN YOUR FOLDER · SKIPPED", "YA ESTÁ EN TU CARPETA · SALTEADA").into(),
         };
-        let path = if !t.path.is_empty() { t.path.clone() } else { t.have.clone() };
+        let path = if !t.path.is_empty() {
+            t.path.clone()
+        } else if !t.have.is_empty() {
+            t.have.clone()
+        } else if t.previewable() && matches!(t.state, TState::Downloading | TState::Done) {
+            // The preview: the file as it downloads.
+            t.part.clone()
+        } else {
+            String::new()
+        };
         let size = if t.total > 0 { t.total } else { std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) };
+        let preview = !path.is_empty() && path == t.part;
         let finished = if t.state == TState::Downloading { history::now() } else { t.finished };
         Detail {
             title: t.title.clone(),
@@ -953,6 +1071,7 @@ impl State {
             cover: if self.kind == "playlist" { String::new() } else { self.cover.clone() },
             moved: false,
             bad: t.state == TState::Missing,
+            preview,
         }
     }
 
@@ -1358,5 +1477,50 @@ mod tests {
         assert!(s.soulseek_wait().is_some_and(|q| q >= 20.0));
         s.apply(ev(r#"{"ev":"track","i":0,"state":"searching"}"#));
         assert!(s.soulseek_wait().is_none(), "progress clears it");
+    }
+
+    #[test]
+    fn candidates_picks_and_the_preview_file() {
+        let ev = |line: &str| backend::parse(line).unwrap();
+        let mut s = State::new(None);
+        s.phase = Phase::Running;
+        s.apply(ev(r#"{"ev":"collection","name":"A","kind":"playlist","manual":true,"tracks":[{"artist":"A","title":"One","duration":200}]}"#));
+        assert!(s.manual);
+        s.apply(ev(r#"{"ev":"track","i":0,"state":"searching"}"#));
+        assert_eq!(s.choosing(), 0, "nothing to pick yet");
+        s.apply(ev(r#"{"ev":"candidates","i":0,"settled":true,"cands":[{"id":4,"user":"zwem","file":"One.mp3","ext":"mp3","size":8000000,"bitrate":320,"duration":201,"free":true,"speed":900000,"queue":0,"fit":100,"score":170.0}]}"#));
+        assert_eq!(s.choosing(), 1);
+        assert_eq!(s.tracks[0].cands[0].user, "zwem");
+        // The engine starts the picked file: its growing file is the preview.
+        s.apply(ev(r#"{"ev":"track","i":0,"state":"downloading","peer":"zwem","source":"soulseek","total":8000000,"path":"/work/0-4.mp3","format":"mp3","cand":4}"#));
+        assert_eq!(s.choosing(), 0);
+        assert!(s.tracks[0].previewable());
+        let g = s.media.growing("/work/0-4.mp3").unwrap();
+        assert_eq!((g.total, g.secs), (8_000_000, 201.0), "the length of the file, not Spotify's");
+        s.apply(ev(r#"{"ev":"bytes","i":0,"bytes":4000000,"total":8000000}"#));
+        let d = s.detail_of("c0").unwrap();
+        assert_eq!(d.path, "/work/0-4.mp3");
+        assert!(d.preview);
+        assert!((s.media.growing("/work/0-4.mp3").unwrap().playable() - 97.0).abs() < 3.0);
+        s.apply(ev(r#"{"ev":"track","i":0,"state":"done","source":"soulseek","peer":"zwem","cand":4}"#));
+        assert!(s.media.growing("/work/0-4.mp3").unwrap().complete());
+        s.apply(ev(r#"{"ev":"file","i":0,"path":"/out/A - One.mp3","bitrate":320}"#));
+        let d = s.detail_of("c0").unwrap();
+        assert_eq!(d.path, "/out/A - One.mp3");
+        assert!(!d.preview);
+    }
+
+    #[test]
+    fn a_failed_file_goes_back_to_searching_and_youtube_files_have_no_preview() {
+        let ev = |line: &str| backend::parse(line).unwrap();
+        let mut s = State::new(None);
+        s.phase = Phase::Running;
+        s.apply(ev(r#"{"ev":"collection","name":"A","kind":"playlist","tracks":[{"artist":"A","title":"One","duration":200}]}"#));
+        s.apply(ev(r#"{"ev":"track","i":0,"state":"downloading","total":8000000,"path":"/work/0-1.mp3","format":"mp3","cand":1}"#));
+        s.apply(ev(r#"{"ev":"track","i":0,"state":"searching"}"#));
+        assert_eq!(s.tracks[0].cand, None);
+        assert!(!s.tracks[0].previewable());
+        s.apply(ev(r#"{"ev":"track","i":0,"state":"yt_download","source":"youtube"}"#));
+        assert!(s.detail_of("c0").unwrap().path.is_empty());
     }
 }

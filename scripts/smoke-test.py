@@ -9,7 +9,7 @@ import tempfile
 
 bin_dir = Path(sys.argv[1]).resolve()
 app = Path(sys.argv[2]).resolve()          # the app window (Rune UI)
-backend = Path(sys.argv[3]).resolve()      # the Go backend it runs
+backend = Path(sys.argv[3]).resolve()      # the engine it runs (Rust)
 ext = '.exe' if sys.platform == 'win32' else ''
 env = os.environ.copy()
 system_path = str(Path(os.environ['SystemRoot']) / 'System32') if ext else '/usr/bin:/bin'
@@ -22,10 +22,11 @@ def run(args):
     result.check_returncode()
     return result.stdout
 
-for tool, flag in [('sockseek', '--help'), ('yt-dlp', '--version'), ('deno', '--version'),
+for tool, flag in [('yt-dlp', '--version'), ('deno', '--version'),
                    ('ffmpeg', '-version'), ('ffprobe', '-version')]:
     run([bin_dir / (tool + ext), flag])
 run([backend, '--cli', '--help'])
+assert run([backend, '--version']).startswith('spotseek-backend ')
 # The window app starts and knows its screens (no GPU or display needed for this).
 assert 'downloading' in run([app, '--list-scenes']).split()
 with tempfile.TemporaryDirectory() as tmp:
