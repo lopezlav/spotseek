@@ -7,6 +7,8 @@
 //!
 //! `spotseek-backend --cli --check-login --user NAME` (password on stdin) signs in once and
 //! prints `{"ok":true}` or `{"ok":false,"reason":"INVALIDPASS","message":"…"}`.
+//!
+//! `spotseek-backend --latest` and `--update`: the newest release, and installing it (`update.rs`).
 
 mod convert;
 mod events;
@@ -15,6 +17,7 @@ mod rank;
 mod slsk;
 mod spotify;
 mod store;
+mod update;
 mod youtube;
 
 use std::io::BufRead;
@@ -39,6 +42,7 @@ const HELP: &str = "spotseek-backend --cli <spotify-url> -o <dir> [options]
   --state-dir DIR    keep the peer memory and the search cache here (default: the app's folder)
 
 spotseek-backend --cli --check-login --user NAME   (password on stdin)
+spotseek-backend --latest | --update               (the newest release; install it)
 ";
 
 #[derive(Default, Debug, PartialEq)]
@@ -227,6 +231,11 @@ fn main() {
     if raw.first().map(String::as_str) == Some("--version") {
         println!("spotseek-backend {}", env!("CARGO_PKG_VERSION"));
         return;
+    }
+    if let Some(cmd @ ("--latest" | "--update")) = raw.first().map(String::as_str) {
+        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio");
+        let code = rt.block_on(async { if cmd == "--latest" { update::latest().await } else { update::update().await } });
+        std::process::exit(code);
     }
     let args = match parse_args(&raw) {
         Ok(a) => a,

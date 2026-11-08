@@ -186,7 +186,7 @@ scripts/fetch-tools.sh build/bin darwin-arm64
 
 ## Build on Windows
 
-Build on a Windows machine with Rust (stable, MSVC toolchain), and put yt-dlp,
+Build on a Windows machine with Rust (stable, MSVC toolchain), and put yt-dlp and
 ffmpeg on the PATH (or in a `bin` folder next to the program):
 
 ```bat
