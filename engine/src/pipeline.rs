@@ -168,6 +168,10 @@ pub async fn run(o: Options, emit: Emitter, controls: mpsc::UnboundedReceiver<Co
 
 async fn run_in(o: Options, emit: Emitter, mut controls: mpsc::UnboundedReceiver<Control>, work: PathBuf) -> Result<()> {
     let started = Instant::now();
+    // The search limit counts the searches of the runs before (Soulseek counts by account).
+    if let Some(d) = &o.state_dir {
+        slsk::remember_searches(d.join("searches.json"));
+    }
 
     // Sign in to Soulseek while Spotify answers.
     let login = o.account.clone().map(|(u, p)| {

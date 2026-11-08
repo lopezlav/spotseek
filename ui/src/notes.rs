@@ -77,6 +77,12 @@ pub fn word(l: Lang, code: &str, title: &str, peer: &str, message: &str, count: 
                     "Soulseek se desconectó: tu cuenta entró en otro lado (otro Spotseek, Nicotine+ u otra computadora). Soulseek permite un solo lugar a la vez.",
                 )
                 .into()
+            } else if message.contains("no answer in time") {
+                l.t(
+                    "The Soulseek server does not answer. After too many searches (more than 34 in 3:40) it blocks the account for up to 30 minutes. Spotseek keeps trying; nothing is lost.",
+                    "El servidor de Soulseek no responde. Después de demasiadas búsquedas (más de 34 en 3:40) bloquea la cuenta hasta 30 minutos. Spotseek sigue intentando; no se pierde nada.",
+                )
+                .into()
             } else {
                 l.t("The connection to Soulseek dropped. Downloads wait; nothing is lost.", "Se cortó la conexión con Soulseek. Las descargas esperan; no se pierde nada.").into()
             }
@@ -247,6 +253,7 @@ mod tests {
             }
         }
         assert!(word(Lang::En, "offline", "", "", "relogged", 0, 0).contains("somewhere else"));
+        assert!(word(Lang::Es, "offline", "", "", "cannot reach the Soulseek server: no answer in time", 0, 0).contains("30 minutos"));
         assert!(word(Lang::Es, "peer_failed", "A – B", "zwem", "queued", 0, 0).contains("cola"));
         assert!(word(Lang::En, "unknown", "", "", "", 0, 0).is_empty());
     }

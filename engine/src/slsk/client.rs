@@ -48,11 +48,26 @@ const PING_EVERY: Duration = Duration::from_secs(120);
 const SEARCH_MAX: usize = 34;
 const SEARCH_WINDOW: Duration = Duration::from_secs(220);
 
+static SEARCH_JOURNAL: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Keep the search times in this file, so the next run counts them. The server counts by
+/// account: a link started right after another one must not search 34 more times (more than 34
+/// in 220 s, and Soulseek closes the connection and bans the account for a while). Call it
+/// before the first search.
+pub fn remember_searches(path: std::path::PathBuf) {
+    let _ = SEARCH_JOURNAL.set(path);
+}
+
 /// One search limit for the whole process: a new session after a reconnect counts the
-/// searches of the one before (the server counts by account).
+/// searches of the one before, and with `remember_searches` so does the next run.
 fn limiter() -> &'static tokio::sync::Mutex<Window> {
     static L: std::sync::OnceLock<tokio::sync::Mutex<Window>> = std::sync::OnceLock::new();
-    L.get_or_init(|| tokio::sync::Mutex::new(Window::new(SEARCH_MAX, SEARCH_WINDOW)))
+    L.get_or_init(|| {
+        tokio::sync::Mutex::new(match SEARCH_JOURNAL.get() {
+            Some(p) => Window::with_journal(SEARCH_MAX, SEARCH_WINDOW, p.clone()),
+            None => Window::new(SEARCH_MAX, SEARCH_WINDOW),
+        })
+    })
 }
 
 /// How long a new search would wait for the limit now.

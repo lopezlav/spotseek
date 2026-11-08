@@ -1,17 +1,52 @@
-//! A sliding-window limit: at most `max` events in any `window`.
+//! A sliding-window limit: at most `max` events in any `window`. With a journal file, the times
+//! are kept on disk, so the next run counts the events of the run before.
 
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
+use std::path::PathBuf;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub struct Window {
     max: usize,
     window: Duration,
     times: VecDeque<Instant>,
+    journal: Option<PathBuf>,
+}
+
+fn unix_now() -> f64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
 }
 
 impl Window {
     pub fn new(max: usize, window: Duration) -> Self {
-        Window { max, window, times: VecDeque::new() }
+        Window { max, window, times: VecDeque::new(), journal: None }
+    }
+
+    /// Like `new`, and reads the times of earlier runs from `path` (a JSON list of Unix seconds);
+    /// each take writes it again.
+    pub fn with_journal(max: usize, window: Duration, path: PathBuf) -> Self {
+        let mut w = Window::new(max, window);
+        let saved: Vec<f64> = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        let (now, unix) = (Instant::now(), unix_now());
+        let mut ages: Vec<f64> = saved.into_iter().map(|t| unix - t).filter(|a| *a >= 0.0 && *a < window.as_secs_f64()).collect();
+        ages.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        w.times = ages.into_iter().filter_map(|a| now.checked_sub(Duration::from_secs_f64(a))).collect();
+        w.journal = Some(path);
+        w
+    }
+
+    fn save(&self) {
+        let Some(path) = &self.journal else { return };
+        let (now, unix) = (Instant::now(), unix_now());
+        let times: Vec<f64> = self.times.iter().map(|t| unix - now.saturating_duration_since(*t).as_secs_f64()).collect();
+        if let Some(d) = path.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        let tmp = path.with_extension("tmp");
+        if let Ok(b) = serde_json::to_vec(&times) {
+            if std::fs::write(&tmp, b).is_ok() {
+                let _ = std::fs::rename(&tmp, path);
+            }
+        }
     }
 
     /// How long a take at `now` would wait (zero when a slot is free).
@@ -34,6 +69,7 @@ impl Window {
         }
         if self.times.len() < self.max {
             self.times.push_back(now);
+            self.save();
             return Ok(());
         }
         let oldest = *self.times.front().expect("max is at least one");
@@ -79,6 +115,26 @@ mod tests {
             assert!(w.try_take(later).is_ok());
         }
         assert!(w.try_take(later).is_err());
+    }
+
+    #[test]
+    fn the_next_run_counts_the_searches_of_the_last_one() {
+        let path = std::env::temp_dir().join(format!("spotseek-searches-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let s = Duration::from_secs;
+        let mut a = Window::with_journal(3, s(220), path.clone());
+        let now = Instant::now();
+        assert!(a.try_take(now).is_ok());
+        assert!(a.try_take(now).is_ok());
+        // A new run (a new process) reads them back: one slot is left.
+        let mut b = Window::with_journal(3, s(220), path.clone());
+        assert!(b.try_take(Instant::now()).is_ok());
+        let wait = b.try_take(Instant::now()).unwrap_err();
+        assert!(wait > s(200), "{wait:?}");
+        // Times older than the window are dropped.
+        std::fs::write(&path, serde_json::to_vec(&[unix_now() - 500.0]).unwrap()).unwrap();
+        assert_eq!(Window::with_journal(3, s(220), path.clone()).wait(Instant::now()), Duration::ZERO);
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]

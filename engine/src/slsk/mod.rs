@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 pub use types::*;
-pub use client::search_wait;
+pub use client::{remember_searches, search_wait};
 
 /// The Soulseek server.
 pub const SERVER: &str = "server.slsknet.org:2271";
