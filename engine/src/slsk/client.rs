@@ -398,7 +398,8 @@ impl Inner {
             }
             Ok(Init::PeerInit { user, kind }) => match kind.as_str() {
                 "P" => {
-                    if permit.is_some() {
+                    // Without a free socket, keep it only when a download from this user waits.
+                    if permit.is_some() || lock(&self.downloads).keys().any(|(u, _)| *u == user) {
                         self.spawn_peer_conn(user, s, permit);
                     }
                 }
@@ -708,6 +709,8 @@ impl Inner {
             got += n as u64;
             if last.elapsed() >= PROGRESS_EVERY {
                 last = Instant::now();
+                // The preview player reads the file: report only what is on disk.
+                file.flush().await?;
                 progress(Progress::Bytes(got));
             }
         }

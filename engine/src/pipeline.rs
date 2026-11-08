@@ -67,6 +67,8 @@ struct Ctx {
     work: PathBuf,
     files: AtomicUsize,
     missing: AtomicUsize,
+    /// Peers that did not start a download in this run (queued or no answer): tried last.
+    stuck: Mutex<std::collections::HashSet<String>>,
 }
 
 /// How a track ended.
@@ -77,12 +79,23 @@ enum End {
     Stopped,
 }
 
-pub async fn run(o: Options, emit: Emitter, mut controls: mpsc::UnboundedReceiver<Control>) -> Result<()> {
-    let started = Instant::now();
+pub async fn run(o: Options, emit: Emitter, controls: mpsc::UnboundedReceiver<Control>) -> Result<()> {
     tokio::fs::create_dir_all(&o.out_dir).await?;
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
     let work = o.out_dir.join(".work").join(format!("run-{stamp}"));
     tokio::fs::create_dir_all(&work).await?;
+    let r = run_in(o, emit, controls, work.clone()).await;
+    // The work folder goes, also after an error.
+    let _ = tokio::fs::remove_dir_all(&work).await;
+    if let Some(p) = work.parent() {
+        // Removes `.work` when no other run uses it.
+        let _ = tokio::fs::remove_dir(p).await;
+    }
+    r
+}
+
+async fn run_in(o: Options, emit: Emitter, mut controls: mpsc::UnboundedReceiver<Control>, work: PathBuf) -> Result<()> {
+    let started = Instant::now();
 
     // Sign in to Soulseek while Spotify answers.
     let login = o.account.clone().map(|(u, p)| {
@@ -165,7 +178,6 @@ pub async fn run(o: Options, emit: Emitter, mut controls: mpsc::UnboundedReceive
     if selected.is_empty() {
         emit.emit(Event::phase("done"));
         emit.emit(Event { name: coll.name.clone(), dir: o.out_dir.to_string_lossy().into_owned(), ..Event::new("result") });
-        let _ = tokio::fs::remove_dir_all(&work).await;
         return Ok(());
     }
 
@@ -209,6 +221,7 @@ pub async fn run(o: Options, emit: Emitter, mut controls: mpsc::UnboundedReceive
         work: work.clone(),
         files: AtomicUsize::new(0),
         missing: AtomicUsize::new(0),
+        stuck: Mutex::default(),
         client,
         emit: emit.clone(),
         o,
@@ -240,11 +253,6 @@ pub async fn run(o: Options, emit: Emitter, mut controls: mpsc::UnboundedReceive
         stopped: stop.is_cancelled(),
         ..Event::new("result")
     });
-    let _ = tokio::fs::remove_dir_all(&work).await;
-    if let Some(p) = work.parent() {
-        // Removes `.work` when no other run uses it.
-        let _ = tokio::fs::remove_dir(p).await;
-    }
     Ok(())
 }
 
@@ -303,13 +311,17 @@ async fn soulseek(ctx: &Arc<Ctx>, c: &Client, i: usize, t: &Track, picks: &mut m
     let mut ranker = Ranker::new(t.clone(), ctx.o.bitrate);
     let (tx, mut answers) = mpsc::unbounded_channel();
     let queries = rank::queries(t);
-    let t0 = Instant::now();
     // Answers keep coming in while the track waits or downloads: more choices if one fails.
     let window = Duration::from_secs(if manual { 30 } else { 20 });
+    // This can wait a long time for the server's search limit; the clock starts when it is sent.
     if let Err(e) = start_search(c, &queries[0], window, ctx.stop.clone(), tx.clone()).await {
         ctx.emit.emit(Event::log(format!("search failed: {e}")));
         return None;
     }
+    if ctx.stop.is_cancelled() {
+        return Some(End::Stopped);
+    }
+    let mut t0 = Instant::now();
     let mut second = queries.get(1).cloned();
     let mut open = true;
     // 1. Collect answers. Most come in the first seconds; stop early once there are enough
@@ -322,8 +334,10 @@ async fn soulseek(ctx: &Arc<Ctx>, c: &Client, i: usize, t: &Track, picks: &mut m
         }
         if el >= Duration::from_secs(4) && ranker.cands.is_empty() {
             if let Some(q) = second.take() {
-                // Nothing yet: also search without the artist.
+                // Nothing yet: also search without the artist (a new clock for it).
                 let _ = start_search(c, &q, window, ctx.stop.clone(), tx.clone()).await;
+                t0 = Instant::now();
+                continue;
             } else if el >= Duration::from_secs(9) {
                 break;
             }
@@ -339,6 +353,10 @@ async fn soulseek(ctx: &Arc<Ctx>, c: &Client, i: usize, t: &Track, picks: &mut m
         send_cands(ctx, i, &mut ranker, false, false);
     }
     drop(tx);
+    // What already came in counts.
+    while let Ok(r) = answers.try_recv() {
+        ranker.add(&r);
+    }
     send_cands(ctx, i, &mut ranker, !manual, true);
     ctx.emit.emit(Event::log(format!("{} - {}: {} files in {:.1} s", t.artist, t.title, ranker.cands.len(), t0.elapsed().as_secs_f32())));
     if ranker.cands.is_empty() {
@@ -382,7 +400,10 @@ async fn soulseek(ctx: &Arc<Ctx>, c: &Client, i: usize, t: &Track, picks: &mut m
             match pending.take() {
                 Some(None) => return None,
                 Some(Some(id)) => Some(id),
-                None => ranker.next().map(|c| c.id),
+                None => {
+                    let stuck = ctx.stuck.lock().unwrap();
+                    ranker.cands.iter().find(|c| !c.failed && !stuck.contains(&c.user)).or_else(|| ranker.next()).map(|c| c.id)
+                }
             }
         };
         let Some(id) = pick else {
@@ -407,6 +428,9 @@ async fn soulseek(ctx: &Arc<Ctx>, c: &Client, i: usize, t: &Track, picks: &mut m
             Fetch::Failed(why) => {
                 ctx.emit.emit(Event::log(format!("{} - {}: {} failed: {why}", t.artist, t.title, cand.user)));
                 ranker.mark_failed(id);
+                if why == "still queued" || why == "did not start" {
+                    ctx.stuck.lock().unwrap().insert(cand.user.clone());
+                }
                 send_cands(ctx, i, &mut ranker, !manual || !open, true);
                 ctx.emit.emit(Event::track(i, "searching"));
             }
@@ -536,6 +560,7 @@ async fn fetch(ctx: &Arc<Ctx>, c: &Client, i: usize, cand: &rank::Cand, picks: &
                         }
                         // Much too slow, and there is something else to try.
                         let secs = s.elapsed().as_secs_f64();
+                        let others = ranker.cands.iter().filter(|x| !x.failed && x.id != cand.id).count().max(others);
                         if !manual && others > 0 && secs > 15.0 {
                             let rate = bytes as f64 / secs;
                             let left = cand.file.size.saturating_sub(bytes) as f64 / rate.max(1.0);
@@ -543,7 +568,7 @@ async fn fetch(ctx: &Arc<Ctx>, c: &Client, i: usize, cand: &rank::Cand, picks: &
                                 return fail(&cancel, &format!("too slow ({:.0} KB/s)", rate / 1000.0));
                             }
                             // A much faster file came in after this one started.
-                            if secs > 4.0 && left > 60.0 {
+                            if left > 60.0 {
                                 let better = ranker.cands.iter().filter(|x| !x.failed && x.id != cand.id && x.free && x.fit >= 90).map(|x| x.eta()).min();
                                 if better.is_some_and(|eta| (eta as f64) * 3.0 < left) {
                                     return fail(&cancel, "a much faster file came in");

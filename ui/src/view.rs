@@ -584,7 +584,7 @@ fn fmt_khz(hz: u32) -> String {
 fn cand_list(s: &State, i: usize, t: &Track) -> (El, f32) {
     let l = s.lang;
     let light = paper().alpha(0.55);
-    let can_pick = t.in_run && !matches!(t.state, TState::Done | TState::Missing | TState::YtSearch | TState::YtDownload);
+    let can_pick = t.in_run && !matches!(t.state, TState::Done | TState::Missing | TState::Failed | TState::YtSearch | TState::YtDownload);
     let head_text = if t.cands.is_empty() {
         if t.settled || !matches!(t.state, TState::Pending | TState::Searching) { l.t("NO FILES ON SOULSEEK", "NO HAY ARCHIVOS EN SOULSEEK").to_string() } else { l.t("SEARCHING SOULSEEK…", "BUSCANDO EN SOULSEEK…").to_string() }
     } else {

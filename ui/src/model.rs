@@ -552,7 +552,7 @@ impl State {
                 self.last_progress = self.now;
                 let Some(t) = e.i.and_then(|i| self.tracks.get_mut(i)) else { return };
                 let Some(st) = TState::from(&e.state) else { return };
-                if st == TState::Downloading && (t.state != TState::Downloading || e.cand != t.cand) {
+                if st == TState::Downloading && (t.state != TState::Downloading || e.path != t.part) {
                     t.bytes = 0;
                 }
                 if e.cand.is_some() {
@@ -671,6 +671,7 @@ impl State {
                 }
                 return;
             }
+            self.manual = e.manual;
             only
         } else {
             self.name = e.name;
@@ -966,7 +967,7 @@ impl State {
     /// Downloads candidate `cand` for track `i`, or (None) takes it from YouTube Music.
     pub fn pick(&mut self, i: usize, cand: Option<u32>) {
         let Some(t) = self.tracks.get_mut(i) else { return };
-        if !t.in_run || matches!(t.state, TState::Done | TState::Missing | TState::YtSearch | TState::YtDownload) {
+        if !t.in_run || matches!(t.state, TState::Done | TState::Missing | TState::Failed | TState::YtSearch | TState::YtDownload) {
             return;
         }
         if cand.is_some() && cand == t.cand {
