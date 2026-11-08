@@ -419,6 +419,8 @@ async fn soulseek(ctx: &Arc<Ctx>, c: &Client, i: usize, t: &Track, picks: &mut m
         let others = ranker.cands.iter().filter(|x| !x.failed && x.id != id).count();
         match fetch(ctx, c, i, &cand, picks, others, (&mut answers, &mut open), &mut ranker).await {
             Fetch::Done(path) => {
+                // It sends after all (it was only busy with another of our files).
+                ctx.stuck.lock().unwrap().remove(&cand.user);
                 ctx.emit.emit(Event { peer: cand.user.clone(), source: "soulseek".into(), total: cand.file.size, bitrate: rank::kbps(&cand.file), cand: Some(id), ..Event::track(i, "done") });
                 return Some(finish(ctx, i, t, &path).await);
             }
