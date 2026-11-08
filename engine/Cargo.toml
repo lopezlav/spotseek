@@ -1,0 +1,28 @@
+[package]
+name = "spotseek-engine"
+version = "0.2.3"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "Spotseek's download engine: Spotify lists, a native Soulseek client, the YouTube Music fallback and mp3 conversion. The app window runs it as spotseek-backend."
+
+[[bin]]
+name = "spotseek-backend"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "process", "fs", "signal"] }
+tokio-util = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+flate2 = "1"
+md-5 = "0.10"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"] }
+regex = "1"
+unicode-normalization = "0.1"
+id3 = "1.17.2"
+num-bigint = "0.4"
+anyhow = "1"
+
+[profile.release]
+codegen-units = 16

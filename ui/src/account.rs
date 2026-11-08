@@ -1,6 +1,6 @@
 //! The Soulseek account. The name is in settings.json; the password is in the system's secure
 //! store (the macOS Keychain, the Windows Credential Manager), never in a file of ours. An
-//! account in Sockseek's own config file (sockseek.conf) also counts.
+//! account in sockseek.conf (the config file of the Sockseek tool) also counts; the engine reads it.
 //!
 //! Soulseek has no sign-up page: signing in with a name that is not taken creates the account.
 //! `check` asks the backend to sign in once (`spotseek-backend --cli --check-login`).
@@ -18,7 +18,7 @@ const SERVICE: &str = "Spotseek Soulseek";
 pub enum Account {
     /// Signed in from this app: the name, and the password from the secure store.
     App(String, String),
-    /// Sockseek's own config file has the name (and the password); Sockseek reads it itself.
+    /// sockseek.conf has the name (and the password); the engine reads it itself.
     Conf(String),
     None,
 }
@@ -63,7 +63,7 @@ pub fn forget(user: &str) {
     }
 }
 
-/// The places Sockseek reads its config from (see its help, "Configuration").
+/// The places of sockseek.conf (the engine reads the same ones).
 fn conf_paths() -> Vec<PathBuf> {
     let mut v = vec![home().join(".config").join("sockseek").join("sockseek.conf")];
     if let Some(a) = std::env::var_os("APPDATA") {

@@ -2,8 +2,7 @@
   "versions": {
     "ffmpeg": "b6.1.1",
     "ytdlp": "2026.10.21",
-    "deno": "v2.9.8",
-    "sockseek": "febfba1fe6125a768c99dd883e477863cee07fbf"
+    "deno": "v2.9.8"
   },
   "platforms": {
     "darwin-arm64": [

@@ -1,3 +1,22 @@
+## New in 0.2.3
+
+- **A new engine, in Rust.** Spotseek now has its own Soulseek client: no more Sockseek, Go or
+  .NET inside the app. Searches for all songs start at once, stop as soon as there are enough
+  good files, and each song is converted the moment it lands.
+- **Better files, faster.** Each file is scored: is it the same song (name and length), is the
+  sound good enough, and will the peer send it soon and fast (free slot, queue, speed). When a
+  file does not start, stalls, or is much too slow, the next one starts. YouTube Music is the
+  last fallback.
+- **FLAC and WAV too, but never "upscaled".** Lossless files and better mp3s are made into the
+  mp3 you chose. A 192 kbps mp3 stays 192 kbps, and YouTube audio is never encoded above what
+  it has.
+- **Pick the file yourself.** Set FILES to I PICK (paste screen or settings): click a song to see
+  what Soulseek found, best first, with format, size, length, free slot or queue, speed and time.
+  You can also change the file in AUTO mode, or send a song to YouTube Music.
+- **Listen while it downloads.** Open a downloading song and press play: the player shows what is
+  on disk and only plays that part; it waits for more by itself and never plays silence.
+- The CLASSIC WINDOW is gone (it was the old Go window).
+
 ## New in 0.2.2
 
 - **Linux.** A new download, `Spotseek-linux-x64.tar.gz`: unpack it and run `install.sh`

@@ -3,8 +3,8 @@
 
 use rune::color::hex;
 use rune::{
-    Color, Curve, Cursor, Cx, Drag, El, Easing, Family, FileDialogOptions, Phase as DragPhase, ScrollSpec, Spring, SurfaceFit, TextStyle, Transition, Tx, col, el,
-    row, text, text_input,
+    Color, Curve, Cursor, Cx, Drag, El, Easing, Family, FileDialogOptions, Phase as DragPhase, ScrollSpec, Shape, Spring, SurfaceFit, TextStyle, Transition, Tx, canvas,
+    col, el, row, text, text_input,
 };
 use rune_motion::Cycle;
 
@@ -13,6 +13,7 @@ use crate::gfx;
 use crate::i18n::{self, Lang};
 use crate::media::{Cover, Wave, clock};
 use crate::model::{Detail, Phase, State, TState, Track};
+use crate::notes::Level;
 
 // ------------------------------------------------------------------ look
 
@@ -148,12 +149,8 @@ fn idle(s: &State, size: [f32; 2]) -> El {
     let footer = row().w_full().h(40.0).center_y().justify_between()
         .child(text(format!("{} · MP3 {}", s.settings.short_dir(), s.settings.bitrate)).key("where").font(mono(14.0, 500.0)).color(ink())
             .cursor(Cursor::Pointer).on_press(|s: &mut State| s.settings_open = true))
-        .child(row().gap(28.0)
-            .child(link_text("classic", l.t("CLASSIC WINDOW", "VENTANA CLÁSICA")).on_press(|s: &mut State| {
-                if let Err(e) = crate::backend::open_classic() {
-                    s.notice = e.to_uppercase();
-                }
-            }))
+        .child(row().gap(28.0).center_y()
+            .child(pick_toggle(s))
             .child(link_text("open-history", l.t("HISTORY", "HISTORIAL")).on_press(|s: &mut State| {
                 s.show_history = true;
                 s.open = None;
@@ -182,6 +179,43 @@ fn idle(s: &State, size: [f32; 2]) -> El {
         .child(footer)
 }
 
+/// AUTO / MANUAL: who picks the Soulseek file for each song.
+fn pick_toggle(s: &State) -> El {
+    let l = s.lang;
+    let part = |key: &str, label: &str, on: bool, manual: bool| {
+        row().key(key).h(24.0).px(8.0).center().cursor(Cursor::Pointer).role("button").label(label)
+            .fill(if on { ink() } else { Color::TRANSPARENT })
+            .on_press(move |s: &mut State| {
+                s.settings.manual = manual;
+                s.save_settings();
+            })
+            .child(text(label.to_string()).font(mono(12.0, 600.0)).color(if on { paper() } else { ink() }))
+    };
+    row().key("pick-mode").gap(8.0).center_y()
+        .child(text(l.t("FILES:", "ARCHIVOS:")).font(mono(12.0, 600.0)).color(muted()))
+        .child(row().border(2.0, ink())
+            .child(part("pick-auto", l.t("AUTO", "AUTO"), !s.settings.manual, false))
+            .child(part("pick-manual", l.t("I PICK", "ELIJO YO"), s.settings.manual, true)))
+}
+
+/// PLAY: ON CLICK / ON HOVER, in the footer of the download screen (away from the track grid,
+/// so reaching it does not sweep over songs). The live mode fills red.
+fn play_toggle(s: &State) -> El {
+    let l = s.lang;
+    let part = |key: &str, label: &str, on: bool, live: bool, hover: bool| {
+        row().key(key).h(24.0).px(8.0).center().cursor(Cursor::Pointer).role("button").label(label)
+            .fill(if on { if live { red() } else { ink() } } else { Color::TRANSPARENT })
+            .on_press(move |s: &mut State| s.set_hover_play(hover))
+            .child(text(label.to_string()).font(mono(12.0, 600.0)).color(if on { paper() } else { ink() }))
+    };
+    let hover = s.settings.hover_play;
+    row().key("play-mode").gap(8.0).center_y()
+        .child(text(l.t("PLAY:", "SONAR:")).font(mono(12.0, 600.0)).color(muted()))
+        .child(row().border(2.0, ink())
+            .child(part("play-click", l.t("ON CLICK", "AL CLIC"), !hover, false, false))
+            .child(part("play-hover", l.t("ON HOVER", "AL PASAR"), hover, true, true)))
+}
+
 // ------------------------------------------------------------------ 2. working
 
 fn fmt_speed(b: f32) -> String {
@@ -208,6 +242,9 @@ fn status(s: &State) -> &'static str {
     }
     if s.soulseek_wait().is_some() {
         return l.t("WAITING FOR SOULSEEK", "ESPERANDO A SOULSEEK");
+    }
+    if s.choosing() > 0 && !s.downloading() {
+        return l.t("PICK A FILE FOR EACH SONG", "ELEGÍ UN ARCHIVO PARA CADA CANCIÓN");
     }
     let running = s.tracks.iter().any(|t| t.in_run);
     if !s.tracks.is_empty() && !running && s.asking() > 0 {
@@ -288,11 +325,16 @@ fn working(s: &State, size: [f32; 2]) -> El {
         if s.login_problem || s.account == Account::None {
             below = below.child(account_banner(s));
         }
-        if let Some(quiet) = s.soulseek_wait() {
+        if s.soulseek_down {
+            below = below.child(down_banner(s));
+        } else if let Some(quiet) = s.soulseek_wait() {
             below = below.child(wait_banner(s, quiet));
         }
         if s.asking() > 0 {
             below = below.child(ask_banner(s));
+        }
+        if s.choosing() > 0 {
+            below = below.child(choose_banner(s));
         }
         below = below.child(track_grid(s, size[0] - 56.0));
     }
@@ -306,7 +348,9 @@ fn working(s: &State, size: [f32; 2]) -> El {
                 (Phase::Running, false) => l.t("STOP", "FRENAR"),
                 _ => l.t("BACK", "VOLVER"),
             }).font(mono(13.0, 600.0)).color(ink())))
-        .child(text(s.last_log.clone()).key("log").font(mono(11.0, 400.0)).color(muted()).truncate().grow(1.0).min_w(0.0))
+        .child(now_playing(s))
+        .child(play_toggle(s))
+        .child(log_line(s))
         .child(text("SPOTSEEK").font(mono(13.0, 600.0)).color(ink()));
 
     let hl = (size[1] * 0.25).clamp(110.0, 240.0);
@@ -317,6 +361,7 @@ fn working(s: &State, size: [f32; 2]) -> El {
             .child(headline(s, status(s)).h(hl))
             .child(bar)
             .child(below))
+        .child(log_drawer(s, (size[1] * 0.42).clamp(220.0, 440.0)))
         .child(rule())
         .child(footer)
 }
@@ -355,7 +400,26 @@ fn ask_banner(s: &State) -> El {
         .child(el().key("ask-time").h(4.0).w_frac(frac).fill(ink()).motion(Spring::new(0.15, 0.0)))
 }
 
-/// No Soulseek account, or Sockseek could not sign in: everything comes from YouTube Music.
+/// Manual mode: songs wait for a pick. Open one to see its files, or take the best for all.
+fn choose_banner(s: &State) -> El {
+    let l = s.lang;
+    let n = s.choosing();
+    let msg = match (l, n) {
+        (Lang::En, 1) => "1 SONG WAITS FOR YOUR PICK · CLICK IT TO SEE ITS FILES".to_string(),
+        (Lang::En, n) => format!("{n} SONGS WAIT FOR YOUR PICK · CLICK ONE TO SEE ITS FILES"),
+        (Lang::Es, 1) => "1 CANCIÓN ESPERA QUE ELIJAS · TOCALA PARA VER SUS ARCHIVOS".to_string(),
+        (Lang::Es, n) => format!("{n} CANCIONES ESPERAN QUE ELIJAS · TOCÁ UNA PARA VER SUS ARCHIVOS"),
+    };
+    row().key("choose").w_full().h(40.0).px(14.0).gap(12.0).center_y().fill(yellow()).border(2.0, ink())
+        .transition(Transition::offset(0.0, -10.0).combined(Transition::opacity()))
+        .child(el().size(9.0, 9.0).radius(5.0).fill(ink()).cycle(BLINK))
+        .child(text(msg).key("choose-msg").font(mono(12.0, 600.0)).color(ink()).truncate().grow(1.0).min_w(0.0))
+        .child(row().key("choose-best").h(28.0).px(10.0).center().fill(ink()).cursor(Cursor::Pointer).role("button").hover(red())
+            .on_press(|s: &mut State| s.pick_best_for_all())
+            .child(text(l.t("BEST FILE FOR ALL", "EL MEJOR PARA TODAS")).font(mono(12.0, 600.0)).color(yellow())))
+}
+
+/// No Soulseek account, or the engine could not sign in: everything comes from YouTube Music.
 fn account_banner(s: &State) -> El {
     let l = s.lang;
     let msg = if s.login_problem {
@@ -369,6 +433,189 @@ fn account_banner(s: &State) -> El {
         .child(row().key("account-banner-go").h(28.0).px(10.0).center().fill(red()).cursor(Cursor::Pointer).role("button")
             .on_press(|s: &mut State| s.settings_open = true)
             .child(text(l.t("ACCOUNT", "CUENTA")).font(mono(12.0, 600.0)).color(paper())))
+}
+
+/// The Soulseek session dropped: the engine signs in again; nothing is lost.
+fn down_banner(s: &State) -> El {
+    let l = s.lang;
+    row().key("down-banner").w_full().h(40.0).px(14.0).gap(12.0).center_y().border(2.0, red()).fill(paper())
+        .transition(Transition::offset(0.0, -10.0).combined(Transition::opacity()))
+        .child(el().size(9.0, 9.0).radius(5.0).fill(red()).cycle(BLINK))
+        .child(text(l.t("SOULSEEK DISCONNECTED · SIGNING IN AGAIN · THE DOWNLOADS WAIT", "SOULSEEK SE DESCONECTÓ · VOLVIENDO A ENTRAR · LAS DESCARGAS ESPERAN"))
+            .font(mono(12.0, 600.0)).color(red()).truncate().grow(1.0).min_w(0.0))
+        .child(row().key("down-log").h(28.0).px(10.0).center().fill(red()).cursor(Cursor::Pointer).role("button")
+            .on_press_tx(|s: &mut State, tx: &mut Tx| {
+                tx.motion_curve(Curve::tween(0.22, EASE_OUT));
+                s.log_open = true;
+            })
+            .child(text(l.t("WHY? ↑", "¿POR QUÉ? ↑")).font(mono(12.0, 600.0)).color(paper())))
+}
+
+fn level_color(lv: Level) -> Color {
+    match lv {
+        Level::Good => c("#5fdcb4"),
+        Level::Info => paper().alpha(0.6),
+        Level::Warn => yellow(),
+        Level::Bad => red(),
+        Level::Tech => paper().alpha(0.3),
+    }
+}
+
+/// The footer's status: the newest note in plain words. A press opens the log.
+fn log_line(s: &State) -> El {
+    let l = s.lang;
+    let (dot, txt, color) = match s.latest_note() {
+        Some(n) => (Some(match n.level { Level::Info => ink().alpha(0.35), lv => level_color(lv) }), n.text.clone(), if n.level.important() { ink() } else { muted() }),
+        None => (None, s.last_log.clone(), muted()),
+    };
+    let important = s.notes.iter().filter(|n| n.level.important()).count();
+    let mut r = row().key("log-line").grow(1.0).min_w(0.0).h(30.0).gap(10.0).center_y().cursor(Cursor::Pointer).role("button")
+        .label(if s.log_open { "Close the log" } else { "Open the log" })
+        .on_press_tx(|s: &mut State, tx: &mut Tx| {
+            tx.motion_curve(Curve::tween(0.22, EASE_OUT));
+            s.log_open = !s.log_open;
+        });
+    if let Some(d) = dot {
+        r = r.child(el().key("log-dot").size(8.0, 8.0).radius(4.0).fill(d));
+    }
+    r = r.child(text(txt).key("log").font(mono(11.0, 500.0)).color(color).truncate().grow(1.0).min_w(0.0));
+    let tag = if important > 0 { format!("{} {important} ", l.t("LOG", "REGISTRO")) } else { l.t("LOG ", "REGISTRO ").to_string() };
+    r.child(row().key("log-open").h(22.0).px(8.0).center().border(1.5, ink()).fill(if s.log_open { ink() } else { Color::TRANSPARENT })
+        .child(text(format!("{tag}{}", if s.log_open { "▼" } else { "▲" })).font(mono(10.5, 600.0)).color(if s.log_open { paper() } else { ink() })))
+}
+
+/// The log, sliding up from the footer: what happened, in plain words, newest at the bottom.
+/// The things that explain a slow or stopped run are marked. The technical lines on request.
+fn log_drawer(s: &State, open_h: f32) -> El {
+    let l = s.lang;
+    let mut d = el().key("log-drawer").w_full().h(if s.log_open { open_h } else { 0.0 }).clip_rounded(0.0).motion(Spring::new(0.22, 0.0));
+    if !s.log_open {
+        return d;
+    }
+    let toggle = |key: &str, label: &str, on: bool| {
+        row().key(key).h(24.0).px(8.0).center().border(1.5, paper()).fill(if on { paper() } else { Color::TRANSPARENT }).cursor(Cursor::Pointer).role("button")
+            .child(text(label.to_string()).font(mono(10.5, 600.0)).color(if on { ink() } else { paper() }))
+    };
+    let head = row().key("log-head").w_full().h(40.0).px(24.0).gap(14.0).center_y()
+        .child(text(l.t("WHAT IS GOING ON", "QUÉ ESTÁ PASANDO")).font(mono(13.0, 600.0)).color(paper()))
+        .child(text(l.t("MARKED: WHAT SLOWS OR STOPS IT", "MARCADO: LO QUE FRENA O DETIENE")).font(mono(10.5, 500.0)).color(paper().alpha(0.5)).truncate().grow(1.0).min_w(0.0))
+        .child(toggle("log-tech", l.t("TECHNICAL DETAILS", "DETALLES TÉCNICOS"), s.log_tech).on_press(|s: &mut State| s.log_tech = !s.log_tech))
+        .child(toggle("log-close", l.t("CLOSE ▼", "CERRAR ▼"), false).on_press_tx(|s: &mut State, tx: &mut Tx| {
+            tx.motion_curve(Curve::tween(0.22, EASE_OUT));
+            s.log_open = false;
+        }));
+    let mut list = col().key("log-list").w_full().px(24.0).pb(12.0).gap(2.0);
+    let shown: Vec<&crate::notes::Note> = s.notes.iter().filter(|n| s.log_tech || n.level != Level::Tech).collect();
+    let skip = shown.len().saturating_sub(300);
+    if shown.is_empty() {
+        list = list.child(text(l.t("NOTHING YET.", "TODAVÍA NADA.")).font(mono(11.0, 500.0)).color(paper().alpha(0.5)));
+    }
+    for (k, n) in shown.iter().enumerate().skip(skip) {
+        let at = if s.session_started > 0.0 { clock(n.at - s.session_started) } else { String::new() };
+        let mark = row().size(10.0, 10.0).fill(level_color(n.level));
+        let body = if n.level == Level::Tech {
+            text(n.tech.clone()).font(mono(10.5, 400.0)).color(paper().alpha(0.45)).wrap().grow(1.0).min_w(0.0)
+        } else {
+            text(n.text.clone()).font(mono(11.5, if n.level.important() { 600.0 } else { 500.0 })).color(if n.level == Level::Info { paper().alpha(0.75) } else { paper() }).wrap().grow(1.0).min_w(0.0)
+        };
+        let mut r = row().key(format!("note-{k}")).w_full().py(4.0).px(6.0).gap(12.0)
+            .child(text(at).font(mono(10.5, 500.0)).color(paper().alpha(0.45)).w(44.0))
+            .child(col().pt(3.0).child(mark))
+            .child(body);
+        if n.level.important() {
+            r = r.fill(level_color(n.level).alpha(0.16));
+        }
+        if s.log_tech && n.level != Level::Tech && !n.tech.is_empty() {
+            r = r.child(text(n.tech.clone()).font(mono(10.0, 400.0)).color(paper().alpha(0.35)).truncate().w(260.0));
+        }
+        list = list.child(r);
+    }
+    d = d.child(col().key("log-panel").w_full().h(open_h).fill(ink())
+        .child(head)
+        .child(col().w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: true }).child(list)));
+    d
+}
+
+// ------------------------------------------------------------------ now playing
+
+/// A small speaker with two sound waves.
+fn speaker(size: f32, color: Color) -> El {
+    let s = size;
+    let body = vec![[0.0, s * 0.36], [s * 0.22, s * 0.36], [s * 0.48, s * 0.12], [s * 0.48, s * 0.88], [s * 0.22, s * 0.64], [0.0, s * 0.64]];
+    let arc = |r: f32| -> Vec<[f32; 2]> {
+        (0..=8).map(|k| {
+            let a = -0.9 + 1.8 * k as f32 / 8.0;
+            [s * 0.5 + r * a.cos(), s * 0.5 + r * a.sin()]
+        }).collect()
+    };
+    canvas(Shape::new().fill(body, color).stroke(arc(s * 0.22), 1.4, color).stroke(arc(s * 0.4), 1.4, color)).size(s, s).inert()
+}
+
+/// The sound that plays, as a moving line: the loudness of the last moments, mirrored around
+/// the middle (a small visualizer, not the waveform of the whole song).
+fn live_line(levels: &[f32], w: f32, h: f32, color: Color) -> El {
+    let n = levels.len();
+    if n < 2 {
+        return el().size(w, h).inert();
+    }
+    let mid = h / 2.0;
+    let x = |k: usize| k as f32 * w / (n - 1) as f32;
+    let top: Vec<[f32; 2]> = levels.iter().enumerate().map(|(k, v)| [x(k), mid - (0.08 + v * 0.92) * mid]).collect();
+    let mut band = top.clone();
+    band.extend(levels.iter().enumerate().rev().map(|(k, v)| [x(k), mid + (0.08 + v * 0.92) * mid]));
+    canvas(Shape::new().fill(band, color.alpha(0.22)).stroke(top, 1.3, color)).size(w, h).inert()
+}
+
+/// Mono text width, in points, for IBM Plex Mono (0.6 em per character).
+fn mono_w(s: &str, size: f32) -> f32 {
+    s.chars().count() as f32 * size * 0.6
+}
+
+/// The title, moving right to left in a loop when it does not fit (as players do).
+#[allow(clippy::too_many_arguments)]
+fn ticker(key: &str, title: &str, w: f32, size: f32, weight: f32, color: Color, now: f64) -> El {
+    let tw = mono_w(title, size);
+    if tw <= w {
+        return text(title.to_string()).key(key).font(mono(size, weight)).color(color).w(w).truncate();
+    }
+    let gap = "   ·   ";
+    let cycle = mono_w(&format!("{title}{gap}"), size);
+    let x = -((now * 38.0) as f32 % cycle);
+    row().key(key).w(w).h(size * 1.5).clip_rounded(0.0).center_y()
+        .child(text(format!("{title}{gap}{title}{gap}")).font(mono(size, weight)).color(color).w(cycle * 2.0 + 4.0).offset(x, 0.0))
+}
+
+/// The small player in the footer: what plays, from any screen of the run, with pause and a
+/// live line. A press on the title opens its details.
+fn now_playing(s: &State) -> El {
+    let st = s.media.status();
+    if st.path.is_empty() || !st.error.is_empty() {
+        return el().key("now-playing");
+    }
+    let l = s.lang;
+    let i = s.playing_track();
+    let title = i.map(|i| s.tracks[i].title.to_uppercase()).unwrap_or_else(|| std::path::Path::new(&st.path).file_stem().map(|x| x.to_string_lossy().to_uppercase()).unwrap_or_default());
+    let on = st.playing || st.buffering;
+    let p = st.path.clone();
+    let mut r = row().key("now-playing").h(30.0).px(8.0).gap(10.0).center_y().border(2.0, ink()).fill(if on { yellow() } else { Color::TRANSPARENT })
+        .child(row().key("np-play").size(22.0, 22.0).radius(11.0).center().fill(ink()).cursor(Cursor::Pointer).role("button").label(if on { "Pause" } else { "Play" })
+            .on_press_tx(move |s: &mut State, tx: &mut Tx| {
+                s.media.toggle(&p);
+                tx.wake_after(std::time::Duration::from_millis(100));
+            })
+            .child(text(if on { "❚❚" } else { "▶" }).font(mono(if on { 9.0 } else { 11.0 }, 600.0)).color(paper())))
+        .child(if on { speaker(14.0, ink()) } else { el().size(14.0, 14.0) })
+        .child(ticker("np-title", &title, 190.0, 11.5, 600.0, ink(), s.now).cursor(Cursor::Pointer).role("button").label(l.t("Show what plays", "Mostrar lo que suena"))
+            .on_press_tx(move |s: &mut State, tx: &mut Tx| {
+                if let Some(i) = i {
+                    tx.motion_curve(Curve::tween(OPEN_SECS, EASE_OUT));
+                    s.open = Some(format!("c{i}"));
+                }
+            }));
+    if on {
+        r = r.child(live_line(&s.media.levels(), 70.0, 20.0, ink()));
+    }
+    r
 }
 
 /// Soulseek is quiet because of its search limit: say so, so it does not look stuck.
@@ -407,7 +654,7 @@ fn track_grid(s: &State, width: f32) -> El {
             if s.open.as_deref() == Some(key.as_str()) {
                 open = Some(key);
             }
-            line = line.child(el().key(format!("slot-{i}")).w(cw).pr(10.0).child(cell(s.lang, i, &s.tracks[i], s.open.as_deref() == Some(format!("c{i}").as_str()))));
+            line = line.child(el().key(format!("slot-{i}")).w(cw).pr(10.0).child(cell(s, i, &s.tracks[i], s.open.as_deref() == Some(format!("c{i}").as_str()), cw - 10.0)));
         }
         grid = grid.child(line).child(band(s, format!("band-{r}"), open, width - 10.0));
     }
@@ -426,9 +673,15 @@ fn open_on_press(key: String) -> impl Fn(&mut State, &mut Tx) + 'static {
     }
 }
 
-fn cell(l: Lang, i: usize, t: &Track, open: bool) -> El {
+fn cell(s: &State, i: usize, t: &Track, open: bool, width: f32) -> El {
+    let (l, manual) = (s.lang, s.manual);
     let title = t.title.to_uppercase();
+    // This track plays now: a speaker, the title moving, and the live line behind it.
+    let st = s.media.status();
+    let sounding = s.playing_track() == Some(i) && (st.playing || st.buffering);
+    let choosing = t.choosing(manual);
     let (bg, fg, chip): (Color, Color, String) = match t.state {
+        _ if choosing => (yellow(), ink(), l.t("PICK ↓", "ELEGÍ ↓").into()),
         TState::Pending => (Color::TRANSPARENT, muted(), String::new()),
         TState::Searching => (Color::TRANSPARENT, ink(), "…".into()),
         TState::Downloading => {
@@ -447,13 +700,24 @@ fn cell(l: Lang, i: usize, t: &Track, open: bool) -> El {
     if t.state == TState::Missing {
         label = label.strike(0, title.len(), Some(muted()));
     }
+    if sounding {
+        // Room for the number, the speaker and the chip.
+        let w = (width - 12.0 - 36.0 - 20.0 - mono_w(&chip, 11.0) - 8.0 - 10.0).max(40.0);
+        label = row().w(w).mr(16.0).child(ticker("title", &title, w, 12.5, 600.0, fg, s.now));
+    }
     let mut chip_el = text(chip).font(mono(11.0, 600.0)).color(fg).ml(8.0);
-    if matches!(t.state, TState::Searching | TState::Failed | TState::YtSearch | TState::YtDownload) {
+    if choosing || matches!(t.state, TState::Searching | TState::Failed | TState::YtSearch | TState::YtDownload) {
         chip_el = chip_el.cycle(BLINK);
     }
     let mut r = row().key(format!("t{i}")).w_full().h(24.0).pl(6.0).pr(6.0).center_y().fill(bg)
         .cursor(Cursor::Pointer).role("button").label(format!("{} details", t.title))
         .on_press_tx(open_on_press(format!("c{i}")))
+        // Hover play: a short wait, so sweeping the mouse across the grid plays nothing.
+        .on_hover_change(move |s: &mut State, inside: bool, tx: &mut Tx| {
+            s.hover_track(i, inside);
+            tx.wake_after(std::time::Duration::from_millis(60));
+        })
+        .hover_delays(std::time::Duration::from_millis(80), std::time::Duration::ZERO)
         .motion(Spring::new(0.35, 0.1))
         .transition(Transition::offset(0.0, 12.0).combined(Transition::opacity()))
         .enter_delay((i as f32 * 0.018).min(1.2));
@@ -464,7 +728,22 @@ fn cell(l: Lang, i: usize, t: &Track, open: bool) -> El {
     // not downloading), so the row keeps the same children in every state.
     let p = if t.state == TState::Downloading && t.total > 0 { t.bytes as f32 / t.total as f32 } else { 0.0 };
     r = r.child(el().key("fill").absolute(0.0, 0.0).h_full().w_frac(p).fill(if p > 0.0 { red() } else { Color::TRANSPARENT }).motion(Spring::new(0.5, 0.0)));
-    r = r.child(text(format!("{:>2}.", i + 1)).key("num").font(mono(12.0, 500.0)).color(fg).w(36.0))
+    r = r.child(if sounding {
+        el().key("live").absolute(0.0, 0.0).child(live_line(&s.media.levels(), width, 24.0, fg.alpha(0.55)))
+    } else {
+        el().key("live")
+    });
+    // Where the song was left: a thin line on the bottom edge.
+    let left_at = s.playable(i).and_then(|p| s.media.position(&p)).unwrap_or(0.0);
+    let len = if t.duration > 0 { t.duration as f64 } else { 0.0 };
+    let frac = if len > 0.0 { (left_at / len).clamp(0.0, 1.0) as f32 } else { 0.0 };
+    let line_color = if bg == ink() { paper() } else if bg == yellow() || bg == red() || bg == stripe(i) && matches!(i % 7, 0 | 2) { ink() } else { red() };
+    r = r.child(el().key("left-at").absolute(0.0, 22.0).h(2.0).w_frac(frac).fill(if frac > 0.0 { line_color } else { Color::TRANSPARENT }));
+    r = r.child(if sounding {
+            el().key("num").w(36.0).child(speaker(14.0, fg))
+        } else {
+            text(format!("{:>2}.", i + 1)).key("num").font(mono(12.0, 500.0)).color(fg).w(36.0)
+        })
         .child(label.key("title"))
         .child(chip_el.key("chip"));
     if t.state == TState::Have {
@@ -484,15 +763,146 @@ fn cell(l: Lang, i: usize, t: &Track, open: bool) -> El {
 // ------------------------------------------------------------------ details
 
 const PANEL_H: f32 = 236.0;
+/// The panel of a track with nothing to show yet (no file, no peer): just the names.
+const PANEL_SMALL_H: f32 = 118.0;
+
+fn panel_h(d: &Detail) -> f32 {
+    if d.path.is_empty() && d.peer.is_empty() && d.size == 0 && !d.moved && d.source.is_empty() { PANEL_SMALL_H } else { PANEL_H }
+}
 
 /// The band under a row: closed (no height), or open with the details of `open`.
 fn band(s: &State, key: String, open: Option<String>, width: f32) -> El {
     let detail = open.as_deref().and_then(|k| s.detail_of(k).map(|d| (k.to_string(), d)));
-    let mut b = el().key(key).w_full().h(if detail.is_some() { PANEL_H + 10.0 } else { 0.0 }).clip_rounded(0.0).motion(Spring::new(OPEN_SECS, 0.0));
+    // A track of this run also shows its Soulseek files, under the details.
+    let files = detail.as_ref().and_then(|(k, _)| {
+        let i = k.strip_prefix('c')?.parse::<usize>().ok()?;
+        let t = s.tracks.get(i)?;
+        (t.in_run || !t.cands.is_empty()).then(|| cand_list(s, i, t))
+    });
+    let files_h = files.as_ref().map_or(0.0, |(_, h)| *h);
+    let mut b = el().key(key).w_full().h(detail.as_ref().map_or(0.0, |(_, d)| panel_h(d) + files_h + 10.0)).clip_rounded(0.0).motion(Spring::new(OPEN_SECS, 0.0));
     if let Some((k, d)) = detail {
-        b = b.child(detail_panel(s, &k, &d, width));
+        let mut c = col().key(format!("open-{k}")).w_full().child(detail_panel(s, &k, &d, width));
+        if let Some((f, _)) = files {
+            c = c.child(f);
+        }
+        b = b.child(c);
     }
     b
+}
+
+/// Rows of files shown at most.
+const CAND_ROWS: usize = 8;
+const CAND_ROW_H: f32 = 30.0;
+
+/// "FLAC 16/44.1", "MP3 320", "M4A 256".
+fn format_label(c: &crate::backend::Cand) -> String {
+    let ext = c.ext.to_uppercase();
+    if matches!(c.ext.as_str(), "flac" | "wav" | "aif" | "aiff" | "ape" | "wv" | "alac") {
+        match (c.bit_depth, c.sample_rate) {
+            (b, r) if b > 0 && r > 0 => format!("{ext} {b}/{}", fmt_khz(r)),
+            (_, r) if r > 0 => format!("{ext} {}", fmt_khz(r)),
+            _ => ext,
+        }
+    } else if c.bitrate > 0 {
+        format!("{ext} {}", c.bitrate)
+    } else {
+        ext
+    }
+}
+
+fn fmt_khz(hz: u32) -> String {
+    let k = hz as f32 / 1000.0;
+    if (k - k.round()).abs() < 0.05 { format!("{:.0}", k) } else { format!("{:.1}", k) }
+}
+
+/// The Soulseek files of track `i`: what tells if it is the right song (length, name) and if it
+/// comes fast (free slot or queue, speed, time). Click one to download it. Returns the height.
+fn cand_list(s: &State, i: usize, t: &Track) -> (El, f32) {
+    let l = s.lang;
+    let light = paper().alpha(0.55);
+    let can_pick = t.in_run && !matches!(t.state, TState::Done | TState::Missing | TState::Failed | TState::YtSearch | TState::YtDownload);
+    let head_text = if t.cands.is_empty() {
+        if t.settled || !matches!(t.state, TState::Pending | TState::Searching) { l.t("NO FILES ON SOULSEEK", "NO HAY ARCHIVOS EN SOULSEEK").to_string() } else { l.t("SEARCHING SOULSEEK…", "BUSCANDO EN SOULSEEK…").to_string() }
+    } else {
+        let n = t.cands.len();
+        let more = if t.settled { String::new() } else { l.t(" · MORE ARE COMING…", " · LLEGAN MÁS…").to_string() };
+        match l {
+            Lang::En => format!("{n} FILE{} ON SOULSEEK, BEST FIRST{more}", if n == 1 { "" } else { "S" }),
+            Lang::Es => format!("{n} ARCHIVO{} EN SOULSEEK, EL MEJOR PRIMERO{more}", if n == 1 { "" } else { "S" }),
+        }
+    };
+    let mut head = row().key("cands-head").w_full().h(28.0).gap(14.0).center_y()
+        .child(text(head_text).font(mono(11.0, 600.0)).color(light).grow(1.0).min_w(0.0).truncate());
+    if can_pick && s.settings.fallback {
+        head = head.child(text(l.t("USE YOUTUBE MUSIC →", "USAR YOUTUBE MUSIC →")).key("cand-yt").font(mono(11.0, 600.0)).color(paper()).cursor(Cursor::Pointer).role("button")
+            .on_press(move |s: &mut State| s.pick(i, None)));
+    }
+    let mut list = col().key(format!("cands-{i}")).w_full().px(18.0).pb(12.0).fill(ink()).transition(Transition::none()).instant_changes().child(head);
+    let rows = t.cands.len().min(CAND_ROWS);
+    for (k, c) in t.cands.iter().take(CAND_ROWS).enumerate() {
+        list = list.child(cand_row(s, i, t, k, c, can_pick));
+    }
+    let h = 28.0 + rows as f32 * CAND_ROW_H + 12.0;
+    (list, h)
+}
+
+fn cand_row(s: &State, i: usize, t: &Track, k: usize, c: &crate::backend::Cand, can_pick: bool) -> El {
+    let l = s.lang;
+    let current = t.cand == Some(c.id);
+    let green = hex("#5fdcb4").unwrap_or(Color::WHITE);
+    // Green: the right song from a free peer. Yellow: the song, but a wait or a doubt. Red: maybe not the song.
+    let dot = if c.failed { muted() } else if c.fit >= 90 && c.free { green } else if c.fit >= 75 { yellow() } else { red() };
+    let fg = if c.failed { paper().alpha(0.35) } else { paper() };
+    let dim = paper().alpha(if c.failed { 0.25 } else { 0.55 });
+    let cell_text = |key: &str, v: String, w: f32, color: Color| text(v).key(key).font(mono(11.5, 600.0)).color(color).w(w).truncate();
+    // The length, and how far it is from Spotify's.
+    let len = if c.duration > 0 {
+        let d = c.duration as i64 - t.duration as i64;
+        if t.duration == 0 || d.abs() <= 2 { clock(c.duration as f64) } else { format!("{} {}{}S", clock(c.duration as f64), if d > 0 { "+" } else { "−" }, d.abs()) }
+    } else {
+        "—".into()
+    };
+    let len_color = if c.duration > 0 && t.duration > 0 && (c.duration as i64 - t.duration as i64).abs() > 5 { red() } else { fg };
+    let wait = if c.free { l.t("FREE NOW", "LIBRE YA").to_string() } else { format!("{} {}", l.t("QUEUE", "COLA"), c.queue) };
+    let eta = if c.eta > 0 { format!("~{}", clock(c.eta as f64)) } else { String::new() };
+    let mut r = row().key(format!("cand-{}", c.id)).w_full().h(CAND_ROW_H).gap(12.0).center_y().px(6.0)
+        .child(el().size(8.0, 8.0).radius(4.0).fill(dot))
+        .child(cell_text("fmt", format_label(c), 92.0, fg))
+        .child(cell_text("size", fmt_size(c.size), 66.0, fg))
+        .child(cell_text("len", len, 92.0, len_color))
+        .child(cell_text("wait", wait, 86.0, if c.free { fg } else { yellow() }))
+        .child(cell_text("speed", if c.speed > 0 { fmt_speed(c.speed as f32) } else { "—".into() }, 78.0, fg))
+        .child(cell_text("eta", eta, 52.0, dim))
+        .child(text(c.user.to_uppercase()).key("user").font(mono(11.5, 600.0)).color(fg).w(130.0).truncate())
+        .child(text(if c.folder.is_empty() { c.file.clone() } else { format!("{}  ·  {}", c.file, c.folder) }).key("file").font(mono(11.0, 400.0)).color(dim).truncate().grow(1.0).min_w(0.0));
+    if k == 0 && !c.failed {
+        r = r.child(row().px(5.0).py(1.0).fill(green).child(text(l.t("BEST", "MEJOR")).font(mono(10.0, 600.0)).color(ink())));
+    }
+    let action = if current {
+        let label = match t.state {
+            TState::Downloading => l.t("DOWNLOADING", "BAJANDO"),
+            TState::Done => l.t("THIS ONE", "ESTE"),
+            _ => l.t("ASKING…", "PIDIENDO…"),
+        };
+        row().key("act").h(20.0).px(8.0).center().fill(red()).child(text(label).font(mono(10.5, 600.0)).color(paper()))
+    } else if c.failed {
+        row().key("act").h(20.0).px(8.0).center().child(text(l.t("FAILED", "FALLÓ")).font(mono(10.5, 600.0)).color(paper().alpha(0.4)))
+    } else if can_pick {
+        row().key("act").h(20.0).px(8.0).center().border(1.5, paper()).child(text(l.t("PICK", "ELEGIR")).font(mono(10.5, 600.0)).color(paper()))
+    } else {
+        el().key("act")
+    };
+    r = r.child(action);
+    if current {
+        r = r.fill(paper().alpha(0.12));
+    }
+    if can_pick && !current && !c.failed {
+        let id = c.id;
+        r = r.cursor(Cursor::Pointer).role("button").label(format!("Download {} from {}", c.file, c.user)).hover(paper().alpha(0.08))
+            .on_press(move |s: &mut State| s.pick(i, Some(id)));
+    }
+    r
 }
 
 fn detail_panel(s: &State, key: &str, d: &Detail, width: f32) -> El {
@@ -500,7 +910,8 @@ fn detail_panel(s: &State, key: &str, d: &Detail, width: f32) -> El {
     let light = paper().alpha(0.55);
 
     // The cover, or a block in the stripe colour with the first letter.
-    let mut cover = el().key("cover").size(PANEL_H - 36.0, PANEL_H - 36.0).border(2.0, paper()).clip_rounded(0.0);
+    let ph = panel_h(d);
+    let mut cover = el().key("cover").size(ph - 36.0, ph - 36.0).border(2.0, paper()).clip_rounded(0.0);
     let pic = if d.path.is_empty() && d.cover.is_empty() { Cover::None } else { s.media.cover(&d.path, &d.cover) };
     cover = match pic {
         Cover::Ready(px) => cover.pixels_fit(&px, SurfaceFit::Fill),
@@ -508,7 +919,7 @@ fn detail_panel(s: &State, key: &str, d: &Detail, width: f32) -> El {
         Cover::None => {
             let i = d.title.bytes().map(|b| b as usize).sum::<usize>();
             let letter: String = d.title.chars().find(|c| c.is_alphanumeric()).map(|c| c.to_uppercase().collect()).unwrap_or_else(|| "?".into());
-            cover.fill(stripe(i)).center().child(text(letter).font(display(120.0)).color(ink()))
+            cover.fill(stripe(i)).center().child(text(letter).font(display(if ph < PANEL_H { 60.0 } else { 120.0 })).color(ink()))
         }
     };
 
@@ -545,7 +956,7 @@ fn detail_panel(s: &State, key: &str, d: &Detail, width: f32) -> El {
             .child(text(d.status.clone()).font(mono(11.0, 600.0)).color(ink())));
 
     let mut links = row().key("links").gap(22.0);
-    if !d.path.is_empty() && !d.path.starts_with("demo://") {
+    if !d.path.is_empty() && !d.path.starts_with("demo://") && !d.preview {
         let p = d.path.clone();
         links = links.child(text(l.t("SHOW IN FOLDER ↗", "MOSTRAR EN LA CARPETA ↗")).key("reveal").font(mono(12.0, 600.0)).color(paper()).cursor(Cursor::Pointer).role("link")
             .on_press(move |_: &mut State| reveal(&p)));
@@ -561,14 +972,18 @@ fn detail_panel(s: &State, key: &str, d: &Detail, width: f32) -> El {
     let player_el = if d.path.is_empty() {
         text(if d.moved {
             l.t("THE FILE IS NOT IN THE FOLDER ANY MORE.", "EL ARCHIVO YA NO ESTÁ EN LA CARPETA.")
-        } else {
+        } else if d.source == "youtube" {
             l.t("THE PLAYER SHOWS UP WHEN THE TRACK IS DOWNLOADED.", "EL REPRODUCTOR APARECE CUANDO LA CANCIÓN SE DESCARGA.")
+        } else {
+            l.t("YOU CAN LISTEN AS SOON AS IT STARTS TO DOWNLOAD.", "LA PODÉS ESCUCHAR APENAS EMPIECE A DESCARGARSE.")
         }).key("no-player").font(mono(12.0, 500.0)).color(light)
     } else {
         player(s, &d.path, d.duration as f64, width)
     };
 
-    row().key(format!("panel-{key}")).w_full().h(PANEL_H).padding(18.0).gap(22.0).fill(ink())
+    let small = ph < PANEL_H;
+    let player_el = if small { el().key("no-player") } else { player_el };
+    row().key(format!("panel-{key}")).w_full().h(ph).padding(18.0).gap(22.0).fill(ink())
         // Everything inside is there from the first frame; only the band's height moves.
         .transition(Transition::none())
         .instant_changes()
@@ -598,14 +1013,27 @@ pub fn track_len(s: &State, path: &str, spotify: f64) -> f64 {
 fn player(s: &State, path: &str, spotify: f64, _width: f32) -> El {
     let st = s.media.status();
     let mine = st.path == path;
-    let len = track_len(s, path, spotify);
+    // A preview: the file is still downloading. Only the part on disk plays.
+    let grow = s.media.growing(path).filter(|g| !g.complete());
+    let len = match grow {
+        Some(g) if g.secs > 0.0 => g.secs,
+        _ => track_len(s, path, spotify),
+    };
+    let ready = grow.map(|g| g.playable());
     let pos = match &s.scrub {
         Some((p, f)) if p == path => *f as f64 * len,
         _ if mine => st.pos,
-        _ => 0.0,
+        // Where it was left (also by a hover play).
+        _ => s.media.position(path).unwrap_or(0.0),
     };
     let frac = if len > 0.0 { (pos / len).clamp(0.0, 1.0) as f32 } else { 0.0 };
-    let playing = mine && st.playing;
+    // The part that can play, 0 to 1.
+    let have = match ready {
+        Some(r) if len > 0.0 => (r / len).clamp(0.0, 1.0) as f32,
+        Some(_) => 0.0,
+        None => 1.0,
+    };
+    let playing = mine && (st.playing || st.buffering);
     let p = path.to_string();
     let button = row().key("play").size(46.0, 46.0).radius(23.0).center().fill(paper()).cursor(Cursor::Pointer).role("button")
         .label(if playing { "Pause" } else { "Play" })
@@ -624,9 +1052,17 @@ fn player(s: &State, path: &str, spotify: f64, _width: f32) -> El {
     match s.media.wave(path) {
         Wave::Ready(peaks, _) => {
             for (k, v) in peaks.iter().enumerate() {
-                let on = (k as f32 + 0.5) / peaks.len() as f32 <= frac;
-                bars = bars.child(el().key(format!("b{k}")).grow(1.0).h(4.0 + v * 46.0).radius(1.0).fill(if on { red() } else { paper().alpha(0.4) }));
+                let x = (k as f32 + 0.5) / peaks.len() as f32;
+                let on = x <= frac;
+                // Not downloaded yet: a low, faint line.
+                let (h, color) = if x > have { (3.0, paper().alpha(0.14)) } else { (4.0 + v * 46.0, if on { red() } else { paper().alpha(0.4) }) };
+                bars = bars.child(el().key(format!("b{k}")).grow(1.0).h(h).radius(1.0).fill(color));
             }
+        }
+        Wave::Loading if grow.is_some() => {
+            // The start of a preview: the downloaded part as a bar.
+            bars = bars.child(el().key("got").h(6.0).w_frac(have.max(0.01)).radius(3.0).fill(paper().alpha(0.4)))
+                .child(el().key("left").h(2.0).grow(1.0).fill(paper().alpha(0.14)));
         }
         Wave::Loading => bars = bars.child(text(s.lang.t("READING THE WAVEFORM…", "LEYENDO LA ONDA…")).font(mono(11.0, 500.0)).color(paper().alpha(0.5)).cycle(BLINK)),
         Wave::Failed => bars = bars.child(el().grow(1.0).h(2.0).fill(paper().alpha(0.4))),
@@ -638,10 +1074,20 @@ fn player(s: &State, path: &str, spotify: f64, _width: f32) -> El {
         }
         let f = (d.x / d.w.max(1.0)).clamp(0.0, 1.0);
         match d.phase {
-            DragPhase::Down | DragPhase::Move => s.scrub = Some((p.clone(), f)),
+            DragPhase::Down | DragPhase::Move => {
+                // Only to where it has downloaded.
+                let f = match s.media.growing(&p).filter(|g| !g.complete()) {
+                    Some(g) if g.secs > 0.0 => f.min((g.playable() / g.secs) as f32),
+                    _ => f,
+                };
+                s.scrub = Some((p.clone(), f));
+            }
             DragPhase::Up => {
-                s.scrub = None;
-                let len = track_len(s, &p, spotify);
+                let f = s.scrub.take().map_or(f, |(_, f)| f);
+                let len = match s.media.growing(&p).filter(|g| !g.complete()) {
+                    Some(g) if g.secs > 0.0 => g.secs,
+                    _ => track_len(s, &p, spotify),
+                };
                 if len > 0.0 {
                     s.media.seek(&p, f as f64 * len);
                     tx.wake_after(std::time::Duration::from_millis(100));
@@ -656,6 +1102,10 @@ fn player(s: &State, path: &str, spotify: f64, _width: f32) -> El {
         .child(text(clock(len)).key("len").font(mono(12.0, 600.0)).color(paper()).w(48.0));
     if mine && !st.error.is_empty() {
         r = r.child(text(st.error.to_uppercase()).font(mono(11.0, 600.0)).color(red()).truncate().max_w(220.0));
+    } else if let Some(rd) = ready {
+        let l = s.lang;
+        let note = if mine && st.buffering { l.t("WAITING FOR MORE…", "ESPERANDO MÁS…").to_string() } else { format!("{} {}", clock(rd), l.t("READY", "LISTO")) };
+        r = r.child(text(note).key("ready").font(mono(11.0, 600.0)).color(yellow()).w(130.0).truncate());
     }
     r
 }
@@ -891,11 +1341,23 @@ fn settings_panel(s: &State) -> El {
         .child(row().w_full().gap(28.0)
             .child(col().gap(8.0).child(label(l.t("MP3 QUALITY (KBPS)", "CALIDAD DEL MP3 (KBPS)"))).child(quality))
             .child(col().gap(8.0).child(label(l.t("LANGUAGE", "IDIOMA"))).child(lang)))
+        .child(label(l.t("WHICH FILE TO DOWNLOAD", "QUÉ ARCHIVO DESCARGAR")))
+        .child(row().gap(0.0)
+            .child(choice("files-auto".into(), l.t("THE BEST ONE, BY ITSELF", "EL MEJOR, SOLO"), !s.settings.manual).on_press(|s: &mut State| s.settings.manual = false))
+            .child(choice("files-manual".into(), l.t("I PICK FOR EACH SONG", "ELIJO YO EN CADA CANCIÓN"), s.settings.manual).on_press(|s: &mut State| s.settings.manual = true)))
         .child(label(l.t("WHEN SOULSEEK CANNOT FIND A TRACK", "SI SOULSEEK NO ENCUENTRA UNA CANCIÓN")))
         .child(row().key("fallback").gap(10.0).center_y().cursor(Cursor::Pointer).on_press(|s: &mut State| s.settings.fallback = !s.settings.fallback)
             .child(row().size(22.0, 22.0).center().border(2.0, ink()).fill(if fb { ink() } else { Color::TRANSPARENT })
                 .child(text(if fb { "✓" } else { "" }).font(mono(13.0, 600.0)).color(paper())))
             .child(text(l.t("TRY YOUTUBE MUSIC", "PROBAR CON YOUTUBE MUSIC")).font(mono(14.0, 600.0)).color(ink())))
+        .child(label(l.t("LISTENING", "ESCUCHAR")))
+        .child(row().key("hover-play").gap(10.0).center_y().cursor(Cursor::Pointer).on_press(|s: &mut State| {
+                let on = !s.settings.hover_play;
+                s.set_hover_play(on);
+            })
+            .child(row().size(22.0, 22.0).center().border(2.0, ink()).fill(if s.settings.hover_play { ink() } else { Color::TRANSPARENT })
+                .child(text(if s.settings.hover_play { "✓" } else { "" }).font(mono(13.0, 600.0)).color(paper())))
+            .child(text(l.t("PLAY A SONG WHEN THE MOUSE PASSES OVER IT", "SONAR UNA CANCIÓN CUANDO PASÁS EL MOUSE")).font(mono(14.0, 600.0)).color(ink())))
         .child(el().h(6.0))
         .child(row().w_full().justify_between().center_y()
             .child(text(l.t("ENTER SAVES · ESC CLOSES", "ENTER GUARDA · ESC CIERRA")).font(mono(11.0, 500.0)).color(muted()))

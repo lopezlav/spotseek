@@ -6,7 +6,9 @@ on:
 permissions:
   contents: read
 jobs:
-  test:
+  # The Go code is only the Mixxx server (`spotseek-app serve`) now; the app does not use it.
+  mixxx-server:
+    name: Mixxx server, Go (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -28,6 +30,29 @@ jobs:
         run: go test -tags ci ./...
       - name: Vet
         run: go vet -tags ci ./...
+  engine:
+    name: engine (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+      - name: Test
+        run: cargo test --release --locked
+      - name: Build
+        run: cargo build --release --locked
+      - name: Start
+        run: cargo run --release --locked -- --cli --help
   ui:
     name: app window (${{ matrix.os }})
     strategy:

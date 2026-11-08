@@ -1,10 +1,10 @@
 [package]
 name = "spotseek-ui"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 license = "MIT"
 publish = false
-description = "Spotseek's Rune front end. It runs the Go backend (spotseek-app --cli --events) and draws its events."
+description = "Spotseek's Rune front end. It runs the engine (spotseek-backend --cli --events) and draws its events."
 
 [[bin]]
 name = "spotseek"
@@ -19,7 +19,7 @@ ab_glyph = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bytemuck = { version = "1", features = ["derive"] }
-rodio = { version = "0.23.0", default-features = false, features = ["playback", "symphonia-mp3"] }
+rodio = { version = "0.23.0", default-features = false, features = ["playback", "symphonia-mp3", "symphonia-flac", "symphonia-wav", "symphonia-pcm", "symphonia-aiff"] }
 id3 = "1.17.2"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 sys-locale = "0.3.2"

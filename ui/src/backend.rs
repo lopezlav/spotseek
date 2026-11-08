@@ -1,5 +1,5 @@
-//! The Go backend as a child process: `spotseek-backend --cli <url> --events`. It writes one
-//! JSON event per line; closing its stdin stops the run.
+//! The engine as a child process: `spotseek-backend --cli <url> --events` (the Rust program in
+//! `engine/`). It writes one JSON event per line; closing its stdin stops the run.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-/// One event from the backend. The fields match `internal/pipeline/events.go`.
+/// One event from the backend. The fields match `engine/src/events.rs`.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Event {
@@ -37,6 +37,46 @@ pub struct Event {
     pub path: String,
     pub cover: String,
     pub stopped: bool,
+    /// track (downloading): the format of the file that grows at `path`.
+    pub format: String,
+    /// track: the candidate it downloads.
+    pub cand: Option<u32>,
+    /// collection: the run waits for a pick for each track.
+    pub manual: bool,
+    /// candidates: the Soulseek files for track `i`, best first.
+    pub cands: Option<Vec<Cand>>,
+    /// candidates: no more will come.
+    pub settled: bool,
+    /// note: what happened (`notes::word` words it), how much it matters, and seconds.
+    pub code: String,
+    pub level: String,
+    pub secs: u32,
+}
+
+/// One Soulseek file for a track (`engine/src/events.rs`, `CandInfo`).
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Cand {
+    pub id: u32,
+    pub user: String,
+    pub file: String,
+    pub folder: String,
+    pub ext: String,
+    pub size: u64,
+    pub bitrate: u32,
+    pub duration: u32,
+    pub sample_rate: u32,
+    pub bit_depth: u32,
+    pub free: bool,
+    /// Bytes per second.
+    pub speed: u32,
+    pub queue: u32,
+    /// 0 to 100: how well the name and length fit the track.
+    pub fit: u32,
+    pub score: f32,
+    /// Seconds the download should take.
+    pub eta: u32,
+    pub failed: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -65,6 +105,8 @@ pub struct Request {
     pub ask: bool,
     /// No Soulseek account: YouTube Music only.
     pub skip_soulseek: bool,
+    /// The user picks the file for each track.
+    pub manual: bool,
     /// Where the backend saves the cover image, or empty.
     pub cover_out: String,
     /// Every line the backend writes (stdout and stderr) is copied here.
@@ -88,20 +130,6 @@ pub fn binary() -> PathBuf {
     let dir = exe.parent().map(PathBuf::from).unwrap_or_default();
     let name = if cfg!(windows) { "spotseek-backend.exe" } else { "spotseek-backend" };
     dir.join(name)
-}
-
-/// Opens the classic (Fyne) window: the backend started with no arguments. It has the
-/// YouTube Music search and the My Spotify library.
-pub fn open_classic() -> Result<(), String> {
-    let bin = binary();
-    let mut cmd = Command::new(&bin);
-    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: no console behind it
-    }
-    cmd.spawn().map(|_| ()).map_err(|e| format!("cannot start {}: {e}", bin.display()))
 }
 
 impl Run {
@@ -131,13 +159,16 @@ impl Run {
         if req.skip_soulseek {
             cmd.arg("--skip-soulseek");
         }
+        if req.manual {
+            cmd.arg("--manual");
+        }
         if !req.cover_out.is_empty() {
             cmd.arg("--cover-out").arg(&req.cover_out);
         }
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         #[cfg(windows)]
         {
-            // The backend and the tools it runs (sockseek, yt-dlp, ffmpeg) are console
+            // The backend and the tools it runs (yt-dlp, ffmpeg) are console
             // programs. Give them one hidden console, so no window opens for each.
             use std::os::windows::process::CommandExt;
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -219,6 +250,18 @@ impl Run {
     pub fn answer(&mut self, only: &[usize]) {
         if let Some(s) = self.stdin.as_mut() {
             let line = serde_json::json!({ "only": only }).to_string();
+            let _ = writeln!(s, "{line}");
+            let _ = s.flush();
+        }
+    }
+
+    /// Downloads candidate `cand` for track `i` (None: from YouTube Music instead).
+    pub fn pick(&mut self, i: usize, cand: Option<u32>) {
+        if let Some(s) = self.stdin.as_mut() {
+            let line = match cand {
+                Some(id) => serde_json::json!({ "pick": { "i": i, "id": id } }),
+                None => serde_json::json!({ "pick": { "i": i, "yt": true } }),
+            };
             let _ = writeln!(s, "{line}");
             let _ = s.flush();
         }

@@ -1,5 +1,6 @@
 //! Spotseek: paste a Spotify link, get mp3 files. This is the Rune front end; the work is done
-//! by the Go backend (`spotseek-backend --cli <url> --events`), which it runs as a child process.
+//! by the Rust engine (`spotseek-backend --cli <url> --events`, in `engine/`), which it runs as a
+//! child process.
 //!
 //! `spotseek --snap out.png --scene downloading` renders a screen headless (see `--list-scenes`).
 
@@ -13,6 +14,7 @@ mod history;
 mod i18n;
 mod media;
 mod model;
+mod notes;
 mod sdf;
 mod settings;
 mod view;
@@ -37,8 +39,12 @@ const FONTS: &[&[u8]] = &[
 fn poll(s: &mut State, now: f64, tx: &mut Tx) -> bool {
     let mut changed = s.tick(now);
     let playing = s.media.status().playing;
-    if playing || s.countdown.is_some() {
-        // The play head and the countdown move every frame or two.
+    if playing {
+        // The title moves and the live line follows the sound: about 30 frames a second.
+        tx.wake_after(Duration::from_millis(33));
+        changed = true;
+    } else if s.countdown.is_some() {
+        // The countdown moves every frame or two.
         tx.wake_after(Duration::from_millis(100));
         changed = true;
     } else if s.phase == Phase::Running {
@@ -53,6 +59,7 @@ fn on_key(s: &mut State, ev: &KeyEvent, _: &mut Tx) -> bool {
         Key::Escape if s.login_open => s.login_open = false,
         Key::Enter if s.settings_open => s.close_settings(),
         Key::Enter if s.login_open => s.sign_in(),
+        Key::Escape if s.hover_started.is_some() => s.stop_hover(),
         Key::Escape if s.open.is_some() => s.open = None,
         Key::Text(t) if t == " " && s.open.is_some() && !(s.phase == Phase::Idle && s.link.focused) => {
             if let Some(d) = s.open.clone().and_then(|k| s.detail_of(&k)) {
@@ -162,7 +169,7 @@ fn scene_details(s: &mut State) {
     t.started = 1_762_500_000.0;
     t.finished = 1_762_500_000.0 + 23.0;
     s.media.fake_wave("demo://2", 213.0, 7);
-    s.media.fake_status(media::Status { path: "demo://2".into(), playing: true, pos: 74.0, dur: 213.0, error: String::new() });
+    s.media.fake_status(media::Status { path: "demo://2".into(), playing: true, pos: 74.0, dur: 213.0, ..Default::default() });
     s.open = Some("c2".into());
 }
 
@@ -275,6 +282,122 @@ fn scene_waiting(s: &mut State) {
     s.last_progress = -42.0;
 }
 
+/// Soulseek files for a demo track: a mix of good, queued, slow and wrong ones.
+fn demo_cands(t: &Track, seed: usize) -> Vec<backend::Cand> {
+    let d = t.duration.max(200);
+    let mk = |id: u32, user: &str, ext: &str, size: u64, br: u32, dur: u32, free: bool, speed: u32, queue: u32, fit: u32, sr: u32, bd: u32, name: &str| backend::Cand {
+        id,
+        user: user.into(),
+        file: format!("{name}.{ext}"),
+        folder: format!("Music/{}", t.artist),
+        ext: ext.into(),
+        size,
+        bitrate: br,
+        duration: dur,
+        sample_rate: sr,
+        bit_depth: bd,
+        free,
+        speed,
+        queue,
+        fit,
+        score: 0.0,
+        eta: (size / speed.max(40_000) as u64) as u32,
+        failed: false,
+    };
+    let name = format!("{:02} - {} - {}", seed % 12 + 1, t.artist, t.title);
+    vec![
+        mk(0, "zwem", "mp3", 8_200_000, 320, d, true, 1_900_000, 0, 100, 0, 0, &name),
+        mk(1, "rodiganhomelab", "flac", 31_400_000, 0, d + 1, true, 2_600_000, 0, 98, 44_100, 16, &name),
+        mk(2, "xXdj_nico", "mp3", 8_100_000, 320, d, false, 3_100_000, 14, 100, 0, 0, &name),
+        mk(3, "hfegetude", "mp3", 4_900_000, 192, d, true, 410_000, 0, 95, 0, 0, &name),
+        mk(4, "djcotter", "mp3", 8_900_000, 320, d + 74, true, 1_200_000, 0, 62, 0, 0, &format!("{} - {} (Extended Mix)", t.artist, t.title)),
+    ]
+}
+
+/// Manual mode: the songs wait for a pick; one is open with its files.
+fn scene_manual(s: &mut State) {
+    demo(s);
+    s.manual = true;
+    s.settings.manual = true;
+    for (i, t) in s.tracks.iter_mut().enumerate() {
+        t.duration = 200 + (i as u32 * 7) % 60;
+        match i {
+            0 | 1 => {
+                t.cands = demo_cands(t, i);
+                t.settled = true;
+                t.cand = Some(0);
+                t.state = TState::Done;
+                t.total = t.cands[0].size;
+                t.bytes = t.total;
+            }
+            2..=9 => {
+                t.cands = demo_cands(t, i);
+                t.settled = i != 3;
+                t.state = TState::Searching;
+            }
+            10..=13 => t.state = TState::Searching,
+            _ => {}
+        }
+    }
+    s.open = Some("c3".into());
+    s.media.fake_wave("demo://none", 1.0, 1);
+}
+
+/// A song that downloads, open: its preview plays the part on disk; the rest is a faint line.
+fn scene_preview(s: &mut State) {
+    scene_downloading(s);
+    let t = &mut s.tracks[21];
+    t.duration = 236;
+    t.cands = demo_cands(t, 21);
+    t.settled = true;
+    t.cand = Some(0);
+    t.total = t.cands[0].size;
+    t.bytes = t.total * 58 / 100;
+    t.part = "demo-part://21".into();
+    t.format = "mp3".into();
+    t.bitrate = 320;
+    t.peer = "zwem".into();
+    t.started = history::now() - 9.0;
+    let (part, bytes, total) = (t.part.clone(), t.bytes, t.total);
+    s.media.set_growing(&part, bytes, total, 236.0);
+    s.media.fake_wave(&part, 236.0, 5);
+    s.media.fake_status(media::Status { path: part, playing: true, pos: 61.0, dur: 236.0, ..Default::default() });
+    s.open = Some("c21".into());
+}
+
+/// A song plays: its row has the speaker, the moving title and the live line; the footer has
+/// the small player.
+fn scene_playing(s: &mut State) {
+    scene_downloading(s);
+    let t = &mut s.tracks[2];
+    t.path = "demo://2".into();
+    t.title = "Lo Que Paso, Paso (Remasterizado 2025)".into();
+    s.media.fake_levels(3);
+    s.media.fake_status(media::Status { path: "demo://2".into(), playing: true, pos: 74.0, dur: 213.0, ..Default::default() });
+    s.now = 2.3;
+}
+
+/// The log, open: what happened in plain words, the marked ones explain the waits.
+fn scene_log(s: &mut State) {
+    scene_downloading(s);
+    s.session_started = history::now() - 400.0;
+    let lines = [
+        r#"{"ev":"note","code":"signed_in","level":"good","line":"Signed in to Soulseek in 1.2 s"}"#,
+        r#"{"ev":"note","code":"found","level":"info","i":0,"count":36,"secs":2,"line":"x"}"#,
+        r#"{"ev":"note","code":"queued","level":"info","i":3,"peer":"rawzik","count":1,"line":"rawzik: queued (place 1)"}"#,
+        r#"{"ev":"note","code":"peer_failed","level":"warn","i":3,"peer":"rawzik","message":"queued","line":"x"}"#,
+        r#"{"ev":"note","code":"downloaded","level":"good","i":3,"peer":"zwem","secs":11,"line":"x"}"#,
+        r#"{"ev":"note","code":"search_limit","level":"warn","count":42,"secs":95,"line":"x"}"#,
+        r#"{"ev":"note","code":"no_files","level":"warn","i":9,"line":"x"}"#,
+        r#"{"ev":"note","code":"offline","level":"bad","message":"relogged","line":"x"}"#,
+        r#"{"ev":"note","code":"reconnecting","level":"warn","secs":60,"line":"x"}"#,
+    ];
+    for l in lines {
+        s.apply(backend::parse(l).unwrap());
+    }
+    s.log_open = true;
+}
+
 fn scene_failed(s: &mut State) {
     demo(s);
     s.phase = Phase::Failed;
@@ -306,6 +429,10 @@ fn main() {
             ("idle-signed-out", scene_idle_signed_out),
             ("waiting", scene_waiting),
             ("settings", scene_settings),
+            ("manual", scene_manual),
+            ("preview", scene_preview),
+            ("playing", scene_playing),
+            ("log", scene_log),
         ],
         fonts: FONTS,
         families: ("Inter", "IBM Plex Mono"),

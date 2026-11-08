@@ -19,7 +19,6 @@ urls = {
     'yt-dlp-LICENSE.txt': f"https://raw.githubusercontent.com/yt-dlp/yt-dlp/{v['ytdlp']}/LICENSE",
     'yt-dlp-THIRD-PARTY.txt': f"https://raw.githubusercontent.com/yt-dlp/yt-dlp/{v['ytdlp']}/THIRD_PARTY_LICENSES.txt",
     'deno-LICENSE.txt': f"https://raw.githubusercontent.com/denoland/deno/{v['deno']}/LICENSE.md",
-    'sockseek-LICENSE.txt': f"https://raw.githubusercontent.com/fiso64/sockseek/{v['sockseek']}/LICENSE",
 }
 for name, url in urls.items():
     subprocess.run(['curl', '-fsSL', '--retry', '3', '-o', str(out / name), url], check=True)
@@ -27,35 +26,23 @@ shutil.copyfile(root / 'THIRD_PARTY_NOTICES.md', out / 'THIRD_PARTY_NOTICES.md')
 shutil.copyfile(root / 'packaging/tools.json', out / 'tools.json')
 if (root / 'LICENSE').exists():
     shutil.copyfile(root / 'LICENSE', out / 'Spotseek-LICENSE.txt')
-# Include the notices from all Go modules, including indirect dependencies.
-subprocess.run(['go', 'mod', 'download'], cwd=root, check=True)
-raw = subprocess.check_output(['go', 'list', '-m', '-json', 'all'], cwd=root, text=True)
-decoder = json.JSONDecoder()
-modules = []
-while raw.strip():
-    module, end = decoder.raw_decode(raw.lstrip())
-    raw = raw.lstrip()[end:]
-    if module.get('Main') or not module.get('Dir'):
-        continue
-    label = module['Path'] + '@' + module['Version']
-    modules.append(label)
-    dest = out / 'go' / label.replace('/', '_')
-    for item in Path(module['Dir']).iterdir():
-        if item.is_file() and item.name.upper().startswith(('LICENSE', 'COPYING', 'NOTICE', 'AUTHORS')):
-            dest.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(item, dest / item.name)
-(out / 'go-modules.txt').write_text('\n'.join(modules) + '\n')
-# The Rune UI: its fonts and every Rust crate it is built from.
+# The Rune UI fonts.
 fonts = out / 'fonts'
 fonts.mkdir(parents=True, exist_ok=True)
 for item in (root / 'ui/assets').glob('*-LICENSE.txt'):
     shutil.copyfile(item, fonts / item.name)
-meta = json.loads(subprocess.check_output(
-    ['cargo', 'metadata', '--format-version', '1', '--locked', '--manifest-path', str(root / 'ui/Cargo.toml')],
-    text=True))
-members = set(meta['workspace_members'])
+# The app window (ui) and the engine (engine) are both Rust: every crate of both.
+packages = {}
+members = set()
+for manifest_path in ['ui/Cargo.toml', 'engine/Cargo.toml']:
+    meta = json.loads(subprocess.check_output(
+        ['cargo', 'metadata', '--format-version', '1', '--locked', '--manifest-path', str(root / manifest_path)],
+        text=True))
+    members |= set(meta['workspace_members'])
+    for pkg in meta['packages']:
+        packages[pkg['id']] = pkg
 crates = []
-for pkg in meta['packages']:
+for pkg in packages.values():
     if pkg['id'] in members:
         continue
     label = f"{pkg['name']}@{pkg['version']}"
@@ -73,7 +60,6 @@ for pkg in meta['packages']:
 (out / 'rust-crates.txt').write_text('\n'.join(sorted(crates)) + '\n')
 (out / 'SOURCES.txt').write_text('\n'.join([
     'Spotseek: https://github.com/lopezlav/spotseek (see the matching release tag)',
-    f"Sockseek: https://github.com/fiso64/sockseek/tree/{v['sockseek']}",
     f"yt-dlp: https://github.com/yt-dlp/yt-dlp/tree/{v['ytdlp']}",
     f"Deno: https://github.com/denoland/deno/tree/{v['deno']}",
     f"FFmpeg binaries and build notices: https://github.com/eugeneware/ffmpeg-static/releases/tag/{v['ffmpeg']}",
