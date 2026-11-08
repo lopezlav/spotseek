@@ -18,7 +18,7 @@
 - **Fewer searches, faster downloads.** Soulseek allows only 34 searches every 3:40, so Spotseek
   now finds songs without searching when it can. When a peer has one song, its folder is checked
   for the others of the list. Peers that sent you good files are remembered, and the next list
-  first looks in what they share. Searches from the last 6 hours are reused. Up to 8 downloads at
+  first looks in what they share. Searches from the last 6 hours are reused. Up to 12 downloads at
   once (YouTube at most 2).
 - The CLASSIC WINDOW is gone (it was the old Go window).
 

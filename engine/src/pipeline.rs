@@ -80,6 +80,9 @@ struct Ctx {
     long_list: bool,
     /// Peer memory and search cache.
     store: Mutex<Store>,
+    /// Peers sending us a file now, and how many. Most peers send one file per user at a time
+    /// and queue the rest.
+    busy: Mutex<HashMap<String, usize>>,
     /// Files found for a track without a search (in a peer's folder or shares), not read yet.
     extra: Mutex<HashMap<usize, Vec<slsk::SearchResponse>>>,
     /// Every track of the list, and the ones of this run that still need a file.
@@ -300,6 +303,7 @@ async fn run_in(o: Options, emit: Emitter, mut controls: mpsc::UnboundedReceiver
         waiting_search: AtomicUsize::new(0),
         long_list: selected.len() > 30,
         store: Mutex::new(Store::load(o.state_dir.clone())),
+        busy: Mutex::default(),
         extra: Mutex::default(),
         tracks: tracks.clone(),
         active: Mutex::new(selected.iter().copied().collect()),
@@ -658,7 +662,12 @@ async fn soulseek(ctx: &Arc<Ctx>, client: Client, i: usize, t: &Track, picks: &m
                 Some(Some(id)) => Some(id),
                 None => {
                     let stuck = ctx.stuck.lock().unwrap();
-                    ranker.cands.iter().find(|c| !c.failed && !stuck.contains(&c.user)).or_else(|| ranker.next()).map(|c| c.id)
+                    let busy = ctx.busy.lock().unwrap();
+                    let open: Vec<&rank::Cand> = ranker.cands.iter().filter(|c| !c.failed && !stuck.contains(&c.user)).collect();
+                    // A peer that already sends us a file queues the next one: take a free
+                    // peer instead when its file is nearly as good.
+                    let best = open.first().map(|c| c.score).unwrap_or(0.0);
+                    open.iter().find(|c| !busy.contains_key(&c.user) && c.score >= best - 20.0).or(open.first()).copied().or_else(|| ranker.next()).map(|c| c.id)
                 }
             }
         };
@@ -747,6 +756,7 @@ enum Fetch {
 async fn fetch(ctx: &Arc<Ctx>, c: &Client, i: usize, cand: &rank::Cand, picks: &mut mpsc::UnboundedReceiver<Pick>, others: usize, answers: (&mut mpsc::UnboundedReceiver<slsk::SearchResponse>, &mut bool), ranker: &mut Ranker) -> Fetch {
     let (answers, open) = answers;
     let manual = ctx.o.manual;
+    let mut busy_guard: Option<Busy> = None;
     // A download slot; a pick while waiting for one counts.
     let _permit = tokio::select! {
         p = ctx.downloads.acquire() => match p { Ok(p) => p, Err(_) => return Fetch::Stopped },
@@ -818,6 +828,9 @@ async fn fetch(ctx: &Arc<Ctx>, c: &Client, i: usize, cand: &rank::Cand, picks: &
                 Progress::Started(_) => {
                     started = Some(Instant::now());
                     last_bytes_at = Instant::now();
+                    if busy_guard.is_none() {
+                        busy_guard = Some(Busy::new(ctx, &cand.user));
+                    }
                 }
                 Progress::Bytes(n) => {
                     if n > bytes {
@@ -852,7 +865,9 @@ async fn fetch(ctx: &Arc<Ctx>, c: &Client, i: usize, cand: &rank::Cand, picks: &
                 match started {
                     None => {
                         // It must start: soon from a free slot, a little later from a queue.
-                        let limit = if manual { 120 } else if queued { 20 } else { 15 };
+                        // Queued behind another of our own files from this peer: we are next.
+                        let behind_ours = queued && ctx.busy.lock().unwrap().get(&cand.user).is_some_and(|n| *n > 0);
+                        let limit = if manual { 120 } else if behind_ours { 240 } else if queued { 20 } else { 15 };
                         if waited > limit && (others > 0 || manual || waited > 60) {
                             return if queued { fail(&cancel, "queued", "still queued") } else { fail(&cancel, "no_start", "did not start") };
                         }
@@ -1086,6 +1101,31 @@ async fn late_search(ctx: &Arc<Ctx>, c: &mut Client, query: &str, window: Durati
             },
             _ = tokio::time::sleep_until(end) => break,
             _ = ctx.stop.cancelled() => break,
+        }
+    }
+}
+
+/// Counts a peer as sending us a file until it is dropped.
+struct Busy {
+    ctx: Arc<Ctx>,
+    user: String,
+}
+
+impl Busy {
+    fn new(ctx: &Arc<Ctx>, user: &str) -> Busy {
+        *ctx.busy.lock().unwrap().entry(user.to_string()).or_default() += 1;
+        Busy { ctx: ctx.clone(), user: user.to_string() }
+    }
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        let mut b = self.ctx.busy.lock().unwrap();
+        if let Some(n) = b.get_mut(&self.user) {
+            *n -= 1;
+            if *n == 0 {
+                b.remove(&self.user);
+            }
         }
     }
 }

@@ -112,7 +112,7 @@ How the engine works (`engine/src`):
   same artist or from the same album (the artist's folder when it is one). Songs that turn up there
   skip their search; songs waiting for the search limit give up their place when they turn up. A
   song found that way still gets its real search when those files fail.
-- `pipeline.rs` - all tracks at the same time (8 downloads at once, YouTube at most 2): search, take the
+- `pipeline.rs` - all tracks at the same time (12 downloads at once, YouTube at most 2; a peer that already sends us a file is avoided when another is nearly as good, since most peers send one file per user at a time): search, take the
   best file, and when it does not start in 15 seconds, stalls, or is much too slow while
   there are other files, take the next one. After six files, or when Soulseek has none,
   YouTube Music. Each track is converted the moment it lands.

@@ -35,7 +35,7 @@ const HELP: &str = "spotseek-backend --cli <spotify-url> -o <dir> [options]
   --pass-stdin       read the Soulseek password from the first stdin line
   --cover-out FILE   with --events: save the collection cover there
   --limit N          only the first N tracks
-  --parallel N       downloads at the same time (default 8; YouTube at most 2)
+  --parallel N       downloads at the same time (default 12; YouTube at most 2)
   --state-dir DIR    keep the peer memory and the search cache here (default: the app's folder)
 
 spotseek-backend --cli --check-login --user NAME   (password on stdin)
@@ -62,7 +62,7 @@ struct Args {
 }
 
 fn parse_args(args: &[String]) -> Result<Args, String> {
-    let mut a = Args { bitrate: 320, parallel: 8, ..Default::default() };
+    let mut a = Args { bitrate: 320, parallel: 12, ..Default::default() };
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         let (flag, inline) = match arg.split_once('=') {
@@ -318,7 +318,7 @@ async fn run(args: Args) -> i32 {
         ffmpeg: "ffmpeg".into(),
         ffprobe: "ffprobe".into(),
         ytdlp: "yt-dlp".into(),
-        parallel: args.parallel.clamp(1, 12),
+        parallel: args.parallel.clamp(1, 16),
         state_dir: if args.state_dir.is_empty() { default_state_dir() } else { Some(PathBuf::from(&args.state_dir)) },
     };
     match pipeline::run(o, emit.clone(), ctl_rx).await {
