@@ -3,8 +3,8 @@
 
 use rune::color::hex;
 use rune::{
-    Color, Curve, Cursor, Cx, Drag, El, Easing, Family, FileDialogOptions, Phase as DragPhase, ScrollSpec, Spring, SurfaceFit, TextStyle, Transition, Tx, col, el,
-    row, text, text_input,
+    Color, Curve, Cursor, Cx, Drag, El, Easing, Family, FileDialogOptions, Phase as DragPhase, ScrollSpec, Shape, Spring, SurfaceFit, TextStyle, Transition, Tx, canvas,
+    col, el, row, text, text_input,
 };
 use rune_motion::Cycle;
 
@@ -13,6 +13,7 @@ use crate::gfx;
 use crate::i18n::{self, Lang};
 use crate::media::{Cover, Wave, clock};
 use crate::model::{Detail, Phase, State, TState, Track};
+use crate::notes::Level;
 
 // ------------------------------------------------------------------ look
 
@@ -306,7 +307,9 @@ fn working(s: &State, size: [f32; 2]) -> El {
         if s.login_problem || s.account == Account::None {
             below = below.child(account_banner(s));
         }
-        if let Some(quiet) = s.soulseek_wait() {
+        if s.soulseek_down {
+            below = below.child(down_banner(s));
+        } else if let Some(quiet) = s.soulseek_wait() {
             below = below.child(wait_banner(s, quiet));
         }
         if s.asking() > 0 {
@@ -327,7 +330,8 @@ fn working(s: &State, size: [f32; 2]) -> El {
                 (Phase::Running, false) => l.t("STOP", "FRENAR"),
                 _ => l.t("BACK", "VOLVER"),
             }).font(mono(13.0, 600.0)).color(ink())))
-        .child(text(s.last_log.clone()).key("log").font(mono(11.0, 400.0)).color(muted()).truncate().grow(1.0).min_w(0.0))
+        .child(now_playing(s))
+        .child(log_line(s))
         .child(text("SPOTSEEK").font(mono(13.0, 600.0)).color(ink()));
 
     let hl = (size[1] * 0.25).clamp(110.0, 240.0);
@@ -338,6 +342,7 @@ fn working(s: &State, size: [f32; 2]) -> El {
             .child(headline(s, status(s)).h(hl))
             .child(bar)
             .child(below))
+        .child(log_drawer(s, (size[1] * 0.42).clamp(220.0, 440.0)))
         .child(rule())
         .child(footer)
 }
@@ -411,6 +416,189 @@ fn account_banner(s: &State) -> El {
             .child(text(l.t("ACCOUNT", "CUENTA")).font(mono(12.0, 600.0)).color(paper())))
 }
 
+/// The Soulseek session dropped: the engine signs in again; nothing is lost.
+fn down_banner(s: &State) -> El {
+    let l = s.lang;
+    row().key("down-banner").w_full().h(40.0).px(14.0).gap(12.0).center_y().border(2.0, red()).fill(paper())
+        .transition(Transition::offset(0.0, -10.0).combined(Transition::opacity()))
+        .child(el().size(9.0, 9.0).radius(5.0).fill(red()).cycle(BLINK))
+        .child(text(l.t("SOULSEEK DISCONNECTED · SIGNING IN AGAIN · THE DOWNLOADS WAIT", "SOULSEEK SE DESCONECTÓ · VOLVIENDO A ENTRAR · LAS DESCARGAS ESPERAN"))
+            .font(mono(12.0, 600.0)).color(red()).truncate().grow(1.0).min_w(0.0))
+        .child(row().key("down-log").h(28.0).px(10.0).center().fill(red()).cursor(Cursor::Pointer).role("button")
+            .on_press_tx(|s: &mut State, tx: &mut Tx| {
+                tx.motion_curve(Curve::tween(0.22, EASE_OUT));
+                s.log_open = true;
+            })
+            .child(text(l.t("WHY? ↑", "¿POR QUÉ? ↑")).font(mono(12.0, 600.0)).color(paper())))
+}
+
+fn level_color(lv: Level) -> Color {
+    match lv {
+        Level::Good => c("#5fdcb4"),
+        Level::Info => paper().alpha(0.6),
+        Level::Warn => yellow(),
+        Level::Bad => red(),
+        Level::Tech => paper().alpha(0.3),
+    }
+}
+
+/// The footer's status: the newest note in plain words. A press opens the log.
+fn log_line(s: &State) -> El {
+    let l = s.lang;
+    let (dot, txt, color) = match s.latest_note() {
+        Some(n) => (Some(match n.level { Level::Info => ink().alpha(0.35), lv => level_color(lv) }), n.text.clone(), if n.level.important() { ink() } else { muted() }),
+        None => (None, s.last_log.clone(), muted()),
+    };
+    let important = s.notes.iter().filter(|n| n.level.important()).count();
+    let mut r = row().key("log-line").grow(1.0).min_w(0.0).h(30.0).gap(10.0).center_y().cursor(Cursor::Pointer).role("button")
+        .label(if s.log_open { "Close the log" } else { "Open the log" })
+        .on_press_tx(|s: &mut State, tx: &mut Tx| {
+            tx.motion_curve(Curve::tween(0.22, EASE_OUT));
+            s.log_open = !s.log_open;
+        });
+    if let Some(d) = dot {
+        r = r.child(el().key("log-dot").size(8.0, 8.0).radius(4.0).fill(d));
+    }
+    r = r.child(text(txt).key("log").font(mono(11.0, 500.0)).color(color).truncate().grow(1.0).min_w(0.0));
+    let tag = if important > 0 { format!("{} {important} ", l.t("LOG", "REGISTRO")) } else { l.t("LOG ", "REGISTRO ").to_string() };
+    r.child(row().key("log-open").h(22.0).px(8.0).center().border(1.5, ink()).fill(if s.log_open { ink() } else { Color::TRANSPARENT })
+        .child(text(format!("{tag}{}", if s.log_open { "▼" } else { "▲" })).font(mono(10.5, 600.0)).color(if s.log_open { paper() } else { ink() })))
+}
+
+/// The log, sliding up from the footer: what happened, in plain words, newest at the bottom.
+/// The things that explain a slow or stopped run are marked. The technical lines on request.
+fn log_drawer(s: &State, open_h: f32) -> El {
+    let l = s.lang;
+    let mut d = el().key("log-drawer").w_full().h(if s.log_open { open_h } else { 0.0 }).clip_rounded(0.0).motion(Spring::new(0.22, 0.0));
+    if !s.log_open {
+        return d;
+    }
+    let toggle = |key: &str, label: &str, on: bool| {
+        row().key(key).h(24.0).px(8.0).center().border(1.5, paper()).fill(if on { paper() } else { Color::TRANSPARENT }).cursor(Cursor::Pointer).role("button")
+            .child(text(label.to_string()).font(mono(10.5, 600.0)).color(if on { ink() } else { paper() }))
+    };
+    let head = row().key("log-head").w_full().h(40.0).px(24.0).gap(14.0).center_y()
+        .child(text(l.t("WHAT IS GOING ON", "QUÉ ESTÁ PASANDO")).font(mono(13.0, 600.0)).color(paper()))
+        .child(text(l.t("MARKED: WHAT SLOWS OR STOPS IT", "MARCADO: LO QUE FRENA O DETIENE")).font(mono(10.5, 500.0)).color(paper().alpha(0.5)).truncate().grow(1.0).min_w(0.0))
+        .child(toggle("log-tech", l.t("TECHNICAL DETAILS", "DETALLES TÉCNICOS"), s.log_tech).on_press(|s: &mut State| s.log_tech = !s.log_tech))
+        .child(toggle("log-close", l.t("CLOSE ▼", "CERRAR ▼"), false).on_press_tx(|s: &mut State, tx: &mut Tx| {
+            tx.motion_curve(Curve::tween(0.22, EASE_OUT));
+            s.log_open = false;
+        }));
+    let mut list = col().key("log-list").w_full().px(24.0).pb(12.0).gap(2.0);
+    let shown: Vec<&crate::notes::Note> = s.notes.iter().filter(|n| s.log_tech || n.level != Level::Tech).collect();
+    let skip = shown.len().saturating_sub(300);
+    if shown.is_empty() {
+        list = list.child(text(l.t("NOTHING YET.", "TODAVÍA NADA.")).font(mono(11.0, 500.0)).color(paper().alpha(0.5)));
+    }
+    for (k, n) in shown.iter().enumerate().skip(skip) {
+        let at = if s.session_started > 0.0 { clock(n.at - s.session_started) } else { String::new() };
+        let mark = row().size(10.0, 10.0).fill(level_color(n.level));
+        let body = if n.level == Level::Tech {
+            text(n.tech.clone()).font(mono(10.5, 400.0)).color(paper().alpha(0.45)).wrap().grow(1.0).min_w(0.0)
+        } else {
+            text(n.text.clone()).font(mono(11.5, if n.level.important() { 600.0 } else { 500.0 })).color(if n.level == Level::Info { paper().alpha(0.75) } else { paper() }).wrap().grow(1.0).min_w(0.0)
+        };
+        let mut r = row().key(format!("note-{k}")).w_full().py(4.0).px(6.0).gap(12.0)
+            .child(text(at).font(mono(10.5, 500.0)).color(paper().alpha(0.45)).w(44.0))
+            .child(col().pt(3.0).child(mark))
+            .child(body);
+        if n.level.important() {
+            r = r.fill(level_color(n.level).alpha(0.16));
+        }
+        if s.log_tech && n.level != Level::Tech && !n.tech.is_empty() {
+            r = r.child(text(n.tech.clone()).font(mono(10.0, 400.0)).color(paper().alpha(0.35)).truncate().w(260.0));
+        }
+        list = list.child(r);
+    }
+    d = d.child(col().key("log-panel").w_full().h(open_h).fill(ink())
+        .child(head)
+        .child(col().w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: true }).child(list)));
+    d
+}
+
+// ------------------------------------------------------------------ now playing
+
+/// A small speaker with two sound waves.
+fn speaker(size: f32, color: Color) -> El {
+    let s = size;
+    let body = vec![[0.0, s * 0.36], [s * 0.22, s * 0.36], [s * 0.48, s * 0.12], [s * 0.48, s * 0.88], [s * 0.22, s * 0.64], [0.0, s * 0.64]];
+    let arc = |r: f32| -> Vec<[f32; 2]> {
+        (0..=8).map(|k| {
+            let a = -0.9 + 1.8 * k as f32 / 8.0;
+            [s * 0.5 + r * a.cos(), s * 0.5 + r * a.sin()]
+        }).collect()
+    };
+    canvas(Shape::new().fill(body, color).stroke(arc(s * 0.22), 1.4, color).stroke(arc(s * 0.4), 1.4, color)).size(s, s).inert()
+}
+
+/// The sound that plays, as a moving line: the loudness of the last moments, mirrored around
+/// the middle (a small visualizer, not the waveform of the whole song).
+fn live_line(levels: &[f32], w: f32, h: f32, color: Color) -> El {
+    let n = levels.len();
+    if n < 2 {
+        return el().size(w, h).inert();
+    }
+    let mid = h / 2.0;
+    let x = |k: usize| k as f32 * w / (n - 1) as f32;
+    let top: Vec<[f32; 2]> = levels.iter().enumerate().map(|(k, v)| [x(k), mid - (0.08 + v * 0.92) * mid]).collect();
+    let mut band = top.clone();
+    band.extend(levels.iter().enumerate().rev().map(|(k, v)| [x(k), mid + (0.08 + v * 0.92) * mid]));
+    canvas(Shape::new().fill(band, color.alpha(0.22)).stroke(top, 1.3, color)).size(w, h).inert()
+}
+
+/// Mono text width, in points, for IBM Plex Mono (0.6 em per character).
+fn mono_w(s: &str, size: f32) -> f32 {
+    s.chars().count() as f32 * size * 0.6
+}
+
+/// The title, moving right to left in a loop when it does not fit (as players do).
+#[allow(clippy::too_many_arguments)]
+fn ticker(key: &str, title: &str, w: f32, size: f32, weight: f32, color: Color, now: f64) -> El {
+    let tw = mono_w(title, size);
+    if tw <= w {
+        return text(title.to_string()).key(key).font(mono(size, weight)).color(color).w(w).truncate();
+    }
+    let gap = "   ·   ";
+    let cycle = mono_w(&format!("{title}{gap}"), size);
+    let x = -((now * 38.0) as f32 % cycle);
+    row().key(key).w(w).h(size * 1.5).clip_rounded(0.0).center_y()
+        .child(text(format!("{title}{gap}{title}{gap}")).font(mono(size, weight)).color(color).w(cycle * 2.0 + 4.0).offset(x, 0.0))
+}
+
+/// The small player in the footer: what plays, from any screen of the run, with pause and a
+/// live line. A press on the title opens its details.
+fn now_playing(s: &State) -> El {
+    let st = s.media.status();
+    if st.path.is_empty() || !st.error.is_empty() {
+        return el().key("now-playing");
+    }
+    let l = s.lang;
+    let i = s.playing_track();
+    let title = i.map(|i| s.tracks[i].title.to_uppercase()).unwrap_or_else(|| std::path::Path::new(&st.path).file_stem().map(|x| x.to_string_lossy().to_uppercase()).unwrap_or_default());
+    let on = st.playing || st.buffering;
+    let p = st.path.clone();
+    let mut r = row().key("now-playing").h(30.0).px(8.0).gap(10.0).center_y().border(2.0, ink()).fill(if on { yellow() } else { Color::TRANSPARENT })
+        .child(row().key("np-play").size(22.0, 22.0).radius(11.0).center().fill(ink()).cursor(Cursor::Pointer).role("button").label(if on { "Pause" } else { "Play" })
+            .on_press_tx(move |s: &mut State, tx: &mut Tx| {
+                s.media.toggle(&p);
+                tx.wake_after(std::time::Duration::from_millis(100));
+            })
+            .child(text(if on { "❚❚" } else { "▶" }).font(mono(if on { 9.0 } else { 11.0 }, 600.0)).color(paper())))
+        .child(if on { speaker(14.0, ink()) } else { el().size(14.0, 14.0) })
+        .child(ticker("np-title", &title, 190.0, 11.5, 600.0, ink(), s.now).cursor(Cursor::Pointer).role("button").label(l.t("Show what plays", "Mostrar lo que suena"))
+            .on_press_tx(move |s: &mut State, tx: &mut Tx| {
+                if let Some(i) = i {
+                    tx.motion_curve(Curve::tween(OPEN_SECS, EASE_OUT));
+                    s.open = Some(format!("c{i}"));
+                }
+            }));
+    if on {
+        r = r.child(live_line(&s.media.levels(), 70.0, 20.0, ink()));
+    }
+    r
+}
+
 /// Soulseek is quiet because of its search limit: say so, so it does not look stuck.
 fn wait_banner(s: &State, quiet: f64) -> El {
     let l = s.lang;
@@ -447,7 +635,7 @@ fn track_grid(s: &State, width: f32) -> El {
             if s.open.as_deref() == Some(key.as_str()) {
                 open = Some(key);
             }
-            line = line.child(el().key(format!("slot-{i}")).w(cw).pr(10.0).child(cell(s.lang, i, &s.tracks[i], s.open.as_deref() == Some(format!("c{i}").as_str()), s.manual)));
+            line = line.child(el().key(format!("slot-{i}")).w(cw).pr(10.0).child(cell(s, i, &s.tracks[i], s.open.as_deref() == Some(format!("c{i}").as_str()), cw - 10.0)));
         }
         grid = grid.child(line).child(band(s, format!("band-{r}"), open, width - 10.0));
     }
@@ -466,8 +654,12 @@ fn open_on_press(key: String) -> impl Fn(&mut State, &mut Tx) + 'static {
     }
 }
 
-fn cell(l: Lang, i: usize, t: &Track, open: bool, manual: bool) -> El {
+fn cell(s: &State, i: usize, t: &Track, open: bool, width: f32) -> El {
+    let (l, manual) = (s.lang, s.manual);
     let title = t.title.to_uppercase();
+    // This track plays now: a speaker, the title moving, and the live line behind it.
+    let st = s.media.status();
+    let sounding = s.playing_track() == Some(i) && (st.playing || st.buffering);
     let choosing = t.choosing(manual);
     let (bg, fg, chip): (Color, Color, String) = match t.state {
         _ if choosing => (yellow(), ink(), l.t("PICK ↓", "ELEGÍ ↓").into()),
@@ -489,6 +681,11 @@ fn cell(l: Lang, i: usize, t: &Track, open: bool, manual: bool) -> El {
     if t.state == TState::Missing {
         label = label.strike(0, title.len(), Some(muted()));
     }
+    if sounding {
+        // Room for the number, the speaker and the chip.
+        let w = (width - 12.0 - 36.0 - 20.0 - mono_w(&chip, 11.0) - 8.0 - 10.0).max(40.0);
+        label = row().w(w).mr(10.0).child(ticker("title", &title, w, 12.5, 600.0, fg, s.now));
+    }
     let mut chip_el = text(chip).font(mono(11.0, 600.0)).color(fg).ml(8.0);
     if choosing || matches!(t.state, TState::Searching | TState::Failed | TState::YtSearch | TState::YtDownload) {
         chip_el = chip_el.cycle(BLINK);
@@ -506,7 +703,13 @@ fn cell(l: Lang, i: usize, t: &Track, open: bool, manual: bool) -> El {
     // not downloading), so the row keeps the same children in every state.
     let p = if t.state == TState::Downloading && t.total > 0 { t.bytes as f32 / t.total as f32 } else { 0.0 };
     r = r.child(el().key("fill").absolute(0.0, 0.0).h_full().w_frac(p).fill(if p > 0.0 { red() } else { Color::TRANSPARENT }).motion(Spring::new(0.5, 0.0)));
+    r = r.child(if sounding {
+        el().key("live").absolute(0.0, 0.0).child(live_line(&s.media.levels(), width, 24.0, fg.alpha(0.55)))
+    } else {
+        el().key("live")
+    });
     r = r.child(text(format!("{:>2}.", i + 1)).key("num").font(mono(12.0, 500.0)).color(fg).w(36.0))
+        .child(if sounding { el().key("spk").pr(6.0).child(speaker(14.0, fg)) } else { el().key("spk") })
         .child(label.key("title"))
         .child(chip_el.key("chip"));
     if t.state == TState::Have {

@@ -86,6 +86,7 @@ pub enum Cover {
 enum Cmd {
     Play(String, f64),
     Toggle,
+    Pause,
     Seek(f64),
     Stop,
     /// The downloaded file became the final mp3: go on with it at the same place.
@@ -102,12 +103,64 @@ pub struct Media {
     wave_bytes: Arc<Mutex<HashMap<String, u64>>>,
     covers: Arc<Mutex<HashMap<String, Cover>>>,
     growing: Growing,
+    /// The loudness of what plays, newest last, about 60 values a second (for the live line).
+    levels: Levels,
+    /// Where each file was left (seconds), so it goes on from there.
+    positions: Positions,
+    /// Tests: no sound output; commands are only written down.
+    silent: Option<Mutex<Vec<String>>>,
     wake: Wake,
 }
 
+type Levels = Arc<Mutex<std::collections::VecDeque<f32>>>;
+type Positions = Arc<Mutex<HashMap<String, f64>>>;
+/// Loudness values kept for the live line.
+pub const LEVELS: usize = 96;
+
 impl Media {
     pub fn new(wake: impl Fn() + Send + Sync + 'static) -> Media {
-        Media { cmds: Mutex::new(None), status: Arc::default(), waves: Arc::default(), wave_bytes: Arc::default(), covers: Arc::default(), growing: Arc::default(), wake: Arc::new(wake) }
+        Media {
+            cmds: Mutex::new(None),
+            status: Arc::default(),
+            waves: Arc::default(),
+            wave_bytes: Arc::default(),
+            covers: Arc::default(),
+            growing: Arc::default(),
+            levels: Arc::default(),
+            positions: Arc::default(),
+            silent: None,
+            wake: Arc::new(wake),
+        }
+    }
+
+    /// For tests and headless scenes: never opens a sound output.
+    pub fn silent() -> Media {
+        Media { silent: Some(Mutex::default()), ..Media::new(|| {}) }
+    }
+
+    /// Tests: the commands a silent media got.
+    pub fn sent(&self) -> Vec<String> {
+        self.silent.as_ref().map(|s| s.lock().unwrap().clone()).unwrap_or_default()
+    }
+
+    /// The loudness of the last moments of what plays, 0 to 1, oldest first.
+    pub fn levels(&self) -> Vec<f32> {
+        self.levels.lock().unwrap().iter().copied().collect()
+    }
+
+    /// Where `path` was left, in seconds.
+    pub fn position(&self, path: &str) -> Option<f64> {
+        let st = self.status();
+        if st.path == path && (st.playing || st.pos > 0.0) {
+            return Some(st.pos);
+        }
+        self.positions.lock().unwrap().get(path).copied()
+    }
+
+    /// For headless scenes: a made-up loudness line.
+    pub fn fake_levels(&self, seed: u32) {
+        let v = (0..LEVELS).map(|i| (0.25 + 0.6 * ((i as f32 * 0.37 + seed as f32).sin() * (i as f32 * 0.11).cos()).abs()).min(1.0)).collect();
+        *self.levels.lock().unwrap() = v;
     }
 
     pub fn status(&self) -> Status {
@@ -115,11 +168,23 @@ impl Media {
     }
 
     fn send(&self, c: Cmd) {
+        if let Some(log) = &self.silent {
+            let line = match &c {
+                Cmd::Play(p, at) => format!("play {p} {at:.1}"),
+                Cmd::Toggle => "toggle".into(),
+                Cmd::Pause => "pause".into(),
+                Cmd::Seek(s) => format!("seek {s:.1}"),
+                Cmd::Stop => "stop".into(),
+                Cmd::Swap(a, b) => format!("swap {a} {b}"),
+            };
+            log.lock().unwrap().push(line);
+            return;
+        }
         let mut cmds = self.cmds.lock().unwrap();
         if cmds.is_none() {
             let (tx, rx) = mpsc::channel();
-            let (status, wake, growing) = (self.status.clone(), self.wake.clone(), self.growing.clone());
-            std::thread::spawn(move || audio(rx, status, wake, growing));
+            let (status, wake, growing, levels, positions) = (self.status.clone(), self.wake.clone(), self.growing.clone(), self.levels.clone(), self.positions.clone());
+            std::thread::spawn(move || audio(rx, status, wake, growing, levels, positions));
             *cmds = Some(tx);
         }
         let _ = cmds.as_ref().unwrap().send(c);
@@ -131,7 +196,34 @@ impl Media {
         if st.path == path {
             self.send(Cmd::Toggle);
         } else {
-            self.send(Cmd::Play(path.to_string(), 0.0));
+            // From where it was left.
+            let at = self.positions.lock().unwrap().get(path).copied().unwrap_or(0.0);
+            self.send(Cmd::Play(path.to_string(), at));
+        }
+    }
+
+    /// Hover play: plays `path` from where it was left (`true`), or pauses it (`false`).
+    pub fn hover(&self, path: &str, on: bool) {
+        let st = self.status();
+        if on {
+            if st.path == path {
+                if !st.playing {
+                    self.send(Cmd::Toggle);
+                }
+            } else {
+                let at = self.positions.lock().unwrap().get(path).copied().unwrap_or(0.0);
+                self.send(Cmd::Play(path.to_string(), at));
+            }
+        } else if st.path == path && (st.playing || st.buffering) {
+            self.send(Cmd::Pause);
+        }
+    }
+
+    /// Pauses what plays (nothing when nothing plays).
+    pub fn pause(&self) {
+        let st = self.status();
+        if st.playing || st.buffering {
+            self.send(Cmd::Pause);
         }
     }
 
@@ -304,7 +396,60 @@ impl std::io::Seek for GrowingFile {
     }
 }
 
-fn audio(rx: mpsc::Receiver<Cmd>, status: Arc<Mutex<Status>>, wake: Wake, growing: Growing) {
+/// Passes the sound through and writes its loudness (the peak of each 1/60 s) for the live line.
+struct Meter<S> {
+    inner: S,
+    levels: Levels,
+    peak: f32,
+    n: usize,
+    block: usize,
+}
+
+impl<S: rodio::Source> Meter<S> {
+    fn new(inner: S, levels: Levels) -> Meter<S> {
+        let block = (inner.sample_rate().get() as usize * inner.channels().get() as usize / 60).max(1);
+        Meter { inner, levels, peak: 0.0, n: 0, block }
+    }
+}
+
+impl<S: rodio::Source> Iterator for Meter<S> {
+    type Item = rodio::Sample;
+    fn next(&mut self) -> Option<rodio::Sample> {
+        let s = self.inner.next()?;
+        self.peak = self.peak.max((s as f32).abs());
+        self.n += 1;
+        if self.n >= self.block {
+            let mut l = self.levels.lock().unwrap();
+            l.push_back(self.peak.min(1.0));
+            while l.len() > LEVELS {
+                l.pop_front();
+            }
+            self.n = 0;
+            self.peak = 0.0;
+        }
+        Some(s)
+    }
+}
+
+impl<S: rodio::Source> rodio::Source for Meter<S> {
+    fn current_span_len(&self) -> Option<usize> {
+        self.inner.current_span_len()
+    }
+    fn channels(&self) -> rodio::ChannelCount {
+        self.inner.channels()
+    }
+    fn sample_rate(&self) -> rodio::SampleRate {
+        self.inner.sample_rate()
+    }
+    fn total_duration(&self) -> Option<Duration> {
+        self.inner.total_duration()
+    }
+    fn try_seek(&mut self, pos: Duration) -> Result<(), rodio::source::SeekError> {
+        self.inner.try_seek(pos)
+    }
+}
+
+fn audio(rx: mpsc::Receiver<Cmd>, status: Arc<Mutex<Status>>, wake: Wake, growing: Growing, levels: Levels, positions: Positions) {
     let sink = match rodio::DeviceSinkBuilder::open_default_sink() {
         Ok(mut s) => {
             s.log_on_drop(false);
@@ -345,7 +490,8 @@ fn audio(rx: mpsc::Receiver<Cmd>, status: Arc<Mutex<Status>>, wake: Wake, growin
                 let dur = dec.total_duration().map_or(0.0, |d| d.as_secs_f64());
                 let dur = if dur > 0.0 { dur } else { grow.map_or(0.0, |g| g.secs) };
                 let p = rodio::Player::connect_new(sink.mixer());
-                p.append(dec);
+                levels.lock().unwrap().clear();
+                p.append(Meter::new(dec, levels.clone()));
                 if at > 0.0 {
                     let _ = p.try_seek(Duration::from_secs_f64(at));
                 }
@@ -360,7 +506,23 @@ fn audio(rx: mpsc::Receiver<Cmd>, status: Arc<Mutex<Status>>, wake: Wake, growin
         let cmd = rx.recv_timeout(Duration::from_millis(80));
         let mut changed = cmd.is_ok();
         match cmd {
-            Ok(Cmd::Play(path, at)) => load(path, at, &mut player),
+            Ok(Cmd::Play(path, at)) => {
+                // The one that played is left where it was.
+                let st = status.lock().unwrap().clone();
+                if !st.path.is_empty() && st.path != path {
+                    positions.lock().unwrap().insert(st.path, st.pos);
+                }
+                load(path, at, &mut player)
+            }
+            Ok(Cmd::Pause) => {
+                if let Some(p) = &player {
+                    p.pause();
+                }
+                let mut st = status.lock().unwrap();
+                st.playing = false;
+                st.buffering = false;
+                positions.lock().unwrap().insert(st.path.clone(), st.pos);
+            }
             Ok(Cmd::Toggle) => {
                 let buffering = status.lock().unwrap().buffering;
                 if buffering {
@@ -423,6 +585,10 @@ fn audio(rx: mpsc::Receiver<Cmd>, status: Arc<Mutex<Status>>, wake: Wake, growin
                 if let Some(p) = player.take() {
                     p.stop();
                 }
+                let st = status.lock().unwrap().clone();
+                if !st.path.is_empty() {
+                    positions.lock().unwrap().insert(st.path, st.pos);
+                }
                 *status.lock().unwrap() = Status::default();
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -442,6 +608,7 @@ fn audio(rx: mpsc::Receiver<Cmd>, status: Arc<Mutex<Status>>, wake: Wake, growin
                     st.playing = false;
                     st.buffering = false;
                     st.pos = 0.0;
+                    positions.lock().unwrap().insert(st.path.clone(), 0.0);
                 }
                 player = None;
                 changed = true;

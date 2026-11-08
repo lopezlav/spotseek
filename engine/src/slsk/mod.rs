@@ -16,6 +16,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 pub use types::*;
+pub use client::search_wait;
 
 /// The Soulseek server.
 pub const SERVER: &str = "server.slsknet.org:2271";
@@ -79,6 +80,11 @@ impl Client {
         // The peer says the size again in its TransferRequest; that value is the one used.
         let _ = size;
         self.inner.download(user, filename, path, progress, cancel).await
+    }
+
+    /// Why the session ended: "relogged" (the account signed in somewhere else), or what broke.
+    pub fn offline_reason(&self) -> String {
+        self.inner.offline_reason()
     }
 
     /// True while the server connection is up.

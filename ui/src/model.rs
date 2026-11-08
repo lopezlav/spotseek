@@ -15,6 +15,7 @@ use crate::i18n::Lang;
 use crate::gfx;
 use crate::history::{self, History, Library, SavedTrack, Session};
 use crate::media::Media;
+use crate::notes::{self, Level, Note};
 use crate::settings::{Settings, config_dir};
 
 /// Seconds the user has to answer "you already have these" once nothing else is downloading.
@@ -265,7 +266,7 @@ pub struct State {
     library: Arc<Mutex<Option<Library>>>,
     /// The session of the current link.
     pub session_id: String,
-    session_started: f64,
+    pub session_started: f64,
     /// The cover image file of the current link, once the backend has saved it.
     pub cover: String,
     /// The open details panel: "c{i}" for a track of this run, "h{session}:{j}" in the history.
@@ -288,6 +289,13 @@ pub struct State {
     pub stopped_early: bool,
     /// The run waits for the user to pick a file for each track.
     pub manual: bool,
+    /// The log: what happens, in plain words (and the technical lines).
+    pub notes: Vec<Note>,
+    /// The log panel is open, and it shows the technical lines too.
+    pub log_open: bool,
+    pub log_tech: bool,
+    /// The Soulseek session dropped and the engine signs in again.
+    pub soulseek_down: bool,
     pub media: Media,
 }
 
@@ -297,11 +305,16 @@ impl State {
         let demo = std::env::var_os("SPOTSEEK_DEMO").is_some_and(|v| v != "0");
         let persist = handle.is_some() && !demo;
         let wake = handle.clone();
-        let media = Media::new(move || {
-            if let Some(h) = &wake {
-                h.update(|_, _| {});
-            }
-        });
+        // Tests and headless scenes (no handle) never open a sound output.
+        let media = if handle.is_some() {
+            Media::new(move || {
+                if let Some(h) = &wake {
+                    h.update(|_, _| {});
+                }
+            })
+        } else {
+            Media::silent()
+        };
         State {
             link: TextEdit::new(""),
             phase: Phase::Idle,
@@ -353,6 +366,10 @@ impl State {
             last_progress: 0.0,
             stopped_early: false,
             manual: false,
+            notes: Vec::new(),
+            log_open: false,
+            log_tech: false,
+            soulseek_down: false,
             media,
         }
     }
@@ -538,6 +555,8 @@ impl State {
         self.login_problem = false;
         self.stopped_early = false;
         self.manual = false;
+        self.notes.clear();
+        self.soulseek_down = false;
     }
 
     pub fn apply(&mut self, e: Event) {
@@ -636,7 +655,11 @@ impl State {
                 }
             }
             "convert" => self.convert = (e.done, e.count),
-            "log" => self.last_log = e.line,
+            "log" => {
+                self.push_note(Level::Tech, String::new(), e.line.clone(), None);
+                self.last_log = e.line;
+            }
+            "note" => self.note(e),
             "login" => self.login_problem = true,
             "result" => {
                 self.run = None;
@@ -705,6 +728,41 @@ impl State {
         if let Some(r) = self.run.as_mut() {
             r.answer(&only);
         }
+    }
+
+    /// A note from the engine: words it, and keeps the state it tells about.
+    fn note(&mut self, e: Event) {
+        let title = e.i.and_then(|i| self.tracks.get(i)).map(|t| format!("{} – {}", t.artist, t.title)).unwrap_or_default();
+        let text = notes::word(self.lang, &e.code, &title, &e.peer, &e.message, e.count, e.secs);
+        match e.code.as_str() {
+            "offline" | "reconnecting" => self.soulseek_down = true,
+            "reconnected" | "signed_in" => self.soulseek_down = false,
+            "login_failed" => {
+                self.soulseek_down = false;
+                self.login_problem = true;
+            }
+            _ => {}
+        }
+        if !e.line.is_empty() {
+            self.last_log = e.line.clone();
+        }
+        self.push_note(Level::from(&e.level), text, e.line, e.i);
+    }
+
+    fn push_note(&mut self, level: Level, text: String, tech: String, i: Option<usize>) {
+        if text.is_empty() && tech.is_empty() {
+            return;
+        }
+        self.notes.push(Note { at: history::now(), level: if text.is_empty() { Level::Tech } else { level }, text, tech, i });
+        if self.notes.len() > notes::MAX_NOTES {
+            let n = self.notes.len() - notes::MAX_NOTES;
+            self.notes.drain(..n);
+        }
+    }
+
+    /// The newest note for people, for the footer.
+    pub fn latest_note(&self) -> Option<&Note> {
+        self.notes.iter().rev().find(|n| n.level != Level::Tech)
     }
 
     fn library_now(&self) -> Option<Library> {
@@ -983,17 +1041,23 @@ impl State {
         }
     }
 
-    /// Manual mode: the best file for every track that waits for a pick.
+    /// Manual mode: the best file for every track that waits for a pick. A track whose files
+    /// all failed goes to YouTube Music (when the fallback is on), so nothing is left waiting.
     pub fn pick_best_for_all(&mut self) {
-        let picks: Vec<(usize, u32)> = self
+        let fallback = self.settings.fallback;
+        let picks: Vec<(usize, Option<u32>)> = self
             .tracks
             .iter()
             .enumerate()
             .filter(|(_, t)| t.choosing(self.manual))
-            .filter_map(|(i, t)| t.cands.iter().find(|c| !c.failed).map(|c| (i, c.id)))
+            .filter_map(|(i, t)| match t.cands.iter().find(|c| !c.failed) {
+                Some(c) => Some((i, Some(c.id))),
+                None if fallback => Some((i, None)),
+                None => None,
+            })
             .collect();
         for (i, id) in picks {
-            self.pick(i, Some(id));
+            self.pick(i, id);
         }
     }
 
@@ -1001,6 +1065,15 @@ impl State {
         if self.persist {
             self.settings.save();
         }
+    }
+
+    /// The track whose file plays (or is loaded in the player).
+    pub fn playing_track(&self) -> Option<usize> {
+        let st = self.media.status();
+        if st.path.is_empty() {
+            return None;
+        }
+        self.tracks.iter().position(|t| t.path == st.path || (!t.part.is_empty() && t.part == st.path) || (!t.have.is_empty() && t.have == st.path))
     }
 
     /// Tracks that wait for a pick.
@@ -1543,5 +1616,41 @@ mod tests {
         assert!(!s.tracks[0].youtube && s.tracks[0].cand == Some(4), "the third file of track 1 was the one");
         assert!(s.tracks.iter().all(|t| t.path.ends_with(".mp3")));
         assert!(!s.tracks[0].cands.is_empty());
+    }
+
+    #[test]
+    fn best_for_all_sends_tracks_with_only_failed_files_to_youtube() {
+        let ev = |line: &str| backend::parse(line).unwrap();
+        let mut s = State::new(None);
+        s.phase = Phase::Running;
+        s.apply(ev(r#"{"ev":"collection","name":"A","kind":"playlist","manual":true,"tracks":[{"artist":"A","title":"One"},{"artist":"B","title":"Two"}]}"#));
+        s.apply(ev(r#"{"ev":"track","i":0,"state":"searching"}"#));
+        s.apply(ev(r#"{"ev":"track","i":1,"state":"searching"}"#));
+        s.apply(ev(r#"{"ev":"candidates","i":0,"cands":[{"id":1,"user":"a","ext":"mp3","size":9,"fit":100}]}"#));
+        s.apply(ev(r#"{"ev":"candidates","i":1,"cands":[{"id":2,"user":"b","ext":"mp3","size":9,"fit":100,"failed":true}]}"#));
+        assert_eq!(s.choosing(), 2);
+        // No run (a test): pick() needs one to send, so check the choice itself.
+        let fallback = s.settings.fallback;
+        let chosen: Vec<Option<u32>> = s.tracks.iter().map(|t| t.cands.iter().find(|c| !c.failed).map(|c| c.id)).collect();
+        assert_eq!(chosen, vec![Some(1), None]);
+        assert!(fallback, "the default sends the second one to YouTube");
+    }
+
+    #[test]
+    fn notes_are_worded_and_mark_a_dropped_session() {
+        let ev = |line: &str| backend::parse(line).unwrap();
+        let mut s = State::new(None);
+        s.phase = Phase::Running;
+        s.apply(ev(r#"{"ev":"collection","name":"A","kind":"playlist","tracks":[{"artist":"Dillom","title":"Coyote"}]}"#));
+        s.apply(ev(r#"{"ev":"note","code":"offline","level":"bad","message":"relogged","line":"Soulseek: the account signed in somewhere else"}"#));
+        assert!(s.soulseek_down);
+        s.apply(ev(r#"{"ev":"note","code":"queued","level":"info","i":0,"peer":"zwem","count":3,"line":"zwem: queued (place 3)"}"#));
+        assert_eq!(s.latest_note().unwrap().text, "Dillom – Coyote: zwem put you in a queue (place 3).");
+        s.apply(ev(r#"{"ev":"note","code":"reconnected","level":"good","line":"Signed in again"}"#));
+        assert!(!s.soulseek_down);
+        s.apply(ev(r#"{"ev":"log","line":"technical only"}"#));
+        assert_eq!(s.notes.last().unwrap().level, Level::Tech);
+        assert_eq!(s.latest_note().unwrap().level, Level::Good, "the footer shows the last note for people");
+        assert!(s.notes.iter().any(|n| n.level == Level::Bad && n.text.contains("somewhere else")));
     }
 }

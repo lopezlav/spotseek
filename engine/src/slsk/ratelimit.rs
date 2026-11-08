@@ -14,6 +14,15 @@ impl Window {
         Window { max, window, times: VecDeque::new() }
     }
 
+    /// How long a take at `now` would wait (zero when a slot is free).
+    pub fn wait(&self, now: Instant) -> Duration {
+        let live: Vec<&Instant> = self.times.iter().filter(|t| now.saturating_duration_since(**t) < self.window).collect();
+        if live.len() < self.max {
+            return Duration::ZERO;
+        }
+        (*live[live.len() - self.max] + self.window).saturating_duration_since(now)
+    }
+
     /// Takes a slot at `now`, or says how long to wait for the next free one.
     pub fn try_take(&mut self, now: Instant) -> Result<(), Duration> {
         while let Some(&t) = self.times.front() {
@@ -58,6 +67,8 @@ mod tests {
         // Full: the first slot frees at t0+10.
         assert_eq!(w.try_take(t0 + s(3)), Err(s(7)));
         assert_eq!(w.try_take(t0 + s(9)), Err(s(1)));
+        assert_eq!(w.wait(t0 + s(9)), s(1), "wait says the same without taking");
+        assert_eq!(w.wait(t0 + s(10)), Duration::ZERO);
         assert!(w.try_take(t0 + s(10)).is_ok());
         // Now the slots are at 1, 2 and 10; the next frees at 11.
         assert_eq!(w.try_take(t0 + s(10)), Err(s(1)));

@@ -14,6 +14,7 @@ mod history;
 mod i18n;
 mod media;
 mod model;
+mod notes;
 mod sdf;
 mod settings;
 mod view;
@@ -38,8 +39,12 @@ const FONTS: &[&[u8]] = &[
 fn poll(s: &mut State, now: f64, tx: &mut Tx) -> bool {
     let mut changed = s.tick(now);
     let playing = s.media.status().playing;
-    if playing || s.countdown.is_some() {
-        // The play head and the countdown move every frame or two.
+    if playing {
+        // The title moves and the live line follows the sound: about 30 frames a second.
+        tx.wake_after(Duration::from_millis(33));
+        changed = true;
+    } else if s.countdown.is_some() {
+        // The countdown moves every frame or two.
         tx.wake_after(Duration::from_millis(100));
         changed = true;
     } else if s.phase == Phase::Running {
@@ -359,6 +364,39 @@ fn scene_preview(s: &mut State) {
     s.open = Some("c21".into());
 }
 
+/// A song plays: its row has the speaker, the moving title and the live line; the footer has
+/// the small player.
+fn scene_playing(s: &mut State) {
+    scene_downloading(s);
+    let t = &mut s.tracks[2];
+    t.path = "demo://2".into();
+    t.title = "Lo Que Paso, Paso (Remasterizado 2025)".into();
+    s.media.fake_levels(3);
+    s.media.fake_status(media::Status { path: "demo://2".into(), playing: true, pos: 74.0, dur: 213.0, ..Default::default() });
+    s.now = 2.3;
+}
+
+/// The log, open: what happened in plain words, the marked ones explain the waits.
+fn scene_log(s: &mut State) {
+    scene_downloading(s);
+    s.session_started = history::now() - 400.0;
+    let lines = [
+        r#"{"ev":"note","code":"signed_in","level":"good","line":"Signed in to Soulseek in 1.2 s"}"#,
+        r#"{"ev":"note","code":"found","level":"info","i":0,"count":36,"secs":2,"line":"x"}"#,
+        r#"{"ev":"note","code":"queued","level":"info","i":3,"peer":"rawzik","count":1,"line":"rawzik: queued (place 1)"}"#,
+        r#"{"ev":"note","code":"peer_failed","level":"warn","i":3,"peer":"rawzik","message":"queued","line":"x"}"#,
+        r#"{"ev":"note","code":"downloaded","level":"good","i":3,"peer":"zwem","secs":11,"line":"x"}"#,
+        r#"{"ev":"note","code":"search_limit","level":"warn","count":42,"secs":95,"line":"x"}"#,
+        r#"{"ev":"note","code":"no_files","level":"warn","i":9,"line":"x"}"#,
+        r#"{"ev":"note","code":"offline","level":"bad","message":"relogged","line":"x"}"#,
+        r#"{"ev":"note","code":"reconnecting","level":"warn","secs":60,"line":"x"}"#,
+    ];
+    for l in lines {
+        s.apply(backend::parse(l).unwrap());
+    }
+    s.log_open = true;
+}
+
 fn scene_failed(s: &mut State) {
     demo(s);
     s.phase = Phase::Failed;
@@ -392,6 +430,8 @@ fn main() {
             ("settings", scene_settings),
             ("manual", scene_manual),
             ("preview", scene_preview),
+            ("playing", scene_playing),
+            ("log", scene_log),
         ],
         fonts: FONTS,
         families: ("Inter", "IBM Plex Mono"),

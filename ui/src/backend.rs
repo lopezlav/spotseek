@@ -47,6 +47,10 @@ pub struct Event {
     pub cands: Option<Vec<Cand>>,
     /// candidates: no more will come.
     pub settled: bool,
+    /// note: what happened (`notes::word` words it), how much it matters, and seconds.
+    pub code: String,
+    pub level: String,
+    pub secs: u32,
 }
 
 /// One Soulseek file for a track (`engine/src/events.rs`, `CandInfo`).

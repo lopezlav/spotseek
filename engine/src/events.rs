@@ -79,6 +79,15 @@ pub struct Event {
     /// candidates: the search is over (no more will come).
     #[serde(skip_serializing_if = "is_false")]
     pub settled: bool,
+    /// note: what happened, as a code the app window words for people (see `pipeline::note`).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub code: String,
+    /// note: "good", "info", "warn" or "bad".
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub level: String,
+    /// note: seconds (a wait, a download time).
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    pub secs: u32,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub line: String,
     #[serde(skip_serializing_if = "String::is_empty")]

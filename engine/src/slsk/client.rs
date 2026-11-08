@@ -47,6 +47,21 @@ const LOGIN_TIMEOUT: Duration = Duration::from_secs(20);
 const PING_EVERY: Duration = Duration::from_secs(120);
 const SEARCH_MAX: usize = 34;
 const SEARCH_WINDOW: Duration = Duration::from_secs(220);
+
+/// One search limit for the whole process: a new session after a reconnect counts the
+/// searches of the one before (the server counts by account).
+fn limiter() -> &'static tokio::sync::Mutex<Window> {
+    static L: std::sync::OnceLock<tokio::sync::Mutex<Window>> = std::sync::OnceLock::new();
+    L.get_or_init(|| tokio::sync::Mutex::new(Window::new(SEARCH_MAX, SEARCH_WINDOW)))
+}
+
+/// How long a new search would wait for the limit now.
+pub fn search_wait() -> Duration {
+    match limiter().try_lock() {
+        Ok(w) => w.wait(std::time::Instant::now()),
+        Err(_) => Duration::ZERO,
+    }
+}
 /// Ask for our place in the queue when no transfer has started after this time.
 const PLACE_ASK_AFTER: Duration = Duration::from_secs(4);
 const PROGRESS_EVERY: Duration = Duration::from_millis(150);
@@ -58,7 +73,8 @@ pub struct Inner {
     server_tx: mpsc::UnboundedSender<Vec<u8>>,
     next_token: AtomicU32,
     next_id: AtomicU64,
-    limiter: tokio::sync::Mutex<Window>,
+    /// Why the server connection ended (empty while it is up).
+    reason: Mutex<String>,
     /// Search token → where its answers go.
     searches: Mutex<HashMap<u32, mpsc::UnboundedSender<SearchResponse>>>,
     /// The newest open P connection to each user.
@@ -212,7 +228,7 @@ impl Inner {
             server_tx,
             next_token: AtomicU32::new(random_u32() & 0x3fff_ffff),
             next_id: AtomicU64::new(1),
-            limiter: tokio::sync::Mutex::new(Window::new(SEARCH_MAX, SEARCH_WINDOW)),
+            reason: Mutex::default(),
             searches: Mutex::default(),
             peers: Mutex::default(),
             indirect: Mutex::default(),
@@ -258,7 +274,20 @@ impl Inner {
         let _ = self.server_tx.send(msg);
     }
 
+    /// Why the session ended: "relogged" (the account signed in somewhere else), or what broke.
+    pub fn offline_reason(&self) -> String {
+        lock(&self.reason).clone()
+    }
+
+    fn set_reason(&self, why: &str) {
+        let mut r = lock(&self.reason);
+        if r.is_empty() {
+            *r = why.to_string();
+        }
+    }
+
     fn set_offline(&self) {
+        self.set_reason("the server closed the connection");
         self.online.store(false, Ordering::SeqCst);
         self.server_gone.cancel();
         // Waiters for the server fail at once.
@@ -277,7 +306,8 @@ impl Inner {
                 m = rx.recv() => match m { Some(m) => m, None => break },
                 _ = ping.tick() => proto::ping(),
             };
-            if wr.write_all(&msg).await.is_err() {
+            if let Err(e) = wr.write_all(&msg).await {
+                self.set_reason(&format!("cannot write to the server: {e}"));
                 break;
             }
         }
@@ -293,9 +323,18 @@ impl Inner {
                 _ = self.server_gone.cancelled() => break,
                 r = proto::read_frame(&mut rd, proto::MAX_SERVER_FRAME) => r,
             };
-            let Ok((code, body)) = r else { break };
+            let (code, body) = match r {
+                Ok(f) => f,
+                Err(e) => {
+                    self.set_reason(&format!("the server connection broke: {e}"));
+                    break;
+                }
+            };
             match code {
-                proto::server::RELOGGED => break,
+                proto::server::RELOGGED => {
+                    self.set_reason("relogged");
+                    break;
+                }
                 proto::server::GET_PEER_ADDRESS => {
                     if let Ok(a) = proto::parse_peer_address(&body) {
                         let waiters = lock(&self.addr_waiters).remove(&a.user).unwrap_or_default();
@@ -726,7 +765,7 @@ impl Inner {
         if !self.online() {
             anyhow::bail!("not signed in to the Soulseek server");
         }
-        ratelimit::acquire(&self.limiter).await;
+        ratelimit::acquire(limiter()).await;
         if !self.online() {
             anyhow::bail!("not signed in to the Soulseek server");
         }
@@ -1008,6 +1047,25 @@ mod tests {
         assert!(c.online());
         tokio::time::sleep(Duration::from_millis(400)).await;
         assert!(!c.online());
+        assert_eq!(c.offline_reason(), "relogged", "the reason is kept for the app window");
         assert!(c.search("x").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_closed_server_connection_says_why() {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            let (mut s, _) = l.accept().await.unwrap();
+            let _ = proto::read_frame(&mut s, 1 << 20).await.unwrap();
+            s.write_all(&proto::Writer::default().bool(true).str("hi").u32(0).str("x").bool(false).frame(1)).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            drop(s);
+        });
+        let c = Client::connect(&addr, "me", "pw").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(!c.online());
+        let why = c.offline_reason();
+        assert!(!why.is_empty() && why != "relogged", "{why}");
     }
 }
