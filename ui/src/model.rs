@@ -1523,4 +1523,24 @@ mod tests {
         s.apply(ev(r#"{"ev":"track","i":0,"state":"yt_download","source":"youtube"}"#));
         assert!(s.detail_of("c0").unwrap().path.is_empty());
     }
+
+    /// A real run of the Rust engine (3 tracks): two files stayed queued and the next ones came,
+    /// one track had no Soulseek files and came from YouTube.
+    #[test]
+    fn a_real_rust_engine_run_ends_done() {
+        let mut s = State::new(None);
+        s.phase = Phase::Running;
+        let mut saw_preview = false;
+        for line in include_str!("../tests/fixtures/real-run-rust.jsonl").lines() {
+            s.apply(backend::parse(line).expect(line));
+            saw_preview |= s.tracks.iter().any(|t| t.state == TState::Downloading && t.previewable());
+        }
+        assert!(saw_preview, "Soulseek downloads give a file to preview");
+        assert_eq!(s.phase, Phase::Done);
+        assert_eq!(s.count(TState::Done), 3);
+        assert!(s.tracks[2].youtube);
+        assert!(!s.tracks[0].youtube && s.tracks[0].cand == Some(4), "the third file of track 1 was the one");
+        assert!(s.tracks.iter().all(|t| t.path.ends_with(".mp3")));
+        assert!(!s.tracks[0].cands.is_empty());
+    }
 }

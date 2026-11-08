@@ -264,11 +264,15 @@ pub struct Ranker {
     pub target: u32,
     pub cands: Vec<Cand>,
     next_id: u32,
+    /// What the app window was last sent, and when (see `to_send`).
+    sent: Vec<CandInfo>,
+    sent_at: Option<std::time::Instant>,
+    sent_settled: bool,
 }
 
 impl Ranker {
     pub fn new(track: Track, target: u32) -> Ranker {
-        Ranker { track, target, cands: Vec::new(), next_id: 0 }
+        Ranker { track, target, cands: Vec::new(), next_id: 0, sent: Vec::new(), sent_at: None, sent_settled: false }
     }
 
     /// Adds a peer's answer. True when a new file fits.
@@ -314,6 +318,28 @@ impl Ranker {
     /// Good candidates: likely the song, from a peer with a free slot.
     pub fn good(&self) -> usize {
         self.cands.iter().filter(|c| !c.failed && c.free && c.fit >= 75).count()
+    }
+
+    /// Very good candidates: surely the song, a free peer, the full sound, and a short download.
+    pub fn excellent(&self) -> usize {
+        self.cands.iter().filter(|c| !c.failed && c.free && c.fit >= 90 && quality(&c.file, self.target) >= 0.99 && c.eta() <= 60).count()
+    }
+
+    /// The list for the app window when it changed, at most every half second (always when
+    /// `force`, or when it becomes settled).
+    pub fn to_send(&mut self, settled: bool, force: bool) -> Option<Vec<CandInfo>> {
+        let infos = self.infos(12);
+        if infos == self.sent && settled == self.sent_settled {
+            return None;
+        }
+        let recent = self.sent_at.is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(500));
+        if recent && !force && settled == self.sent_settled {
+            return None;
+        }
+        self.sent = infos.clone();
+        self.sent_at = Some(std::time::Instant::now());
+        self.sent_settled = settled;
+        Some(infos)
     }
 
     /// The first `n`, for the app window.

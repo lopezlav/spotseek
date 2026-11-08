@@ -289,9 +289,11 @@ async fn track_job(ctx: Arc<Ctx>, i: usize, t: Track, mut picks: mpsc::Unbounded
     }
 }
 
-/// Sends the candidates of track `i`.
-fn send_cands(ctx: &Ctx, i: usize, r: &Ranker, settled: bool) {
-    ctx.emit.emit(Event { i: Some(i), cands: Some(r.infos(12)), settled, ..Event::new("candidates") });
+/// Sends the candidates of track `i` when they changed (at most every half second unless `force`).
+fn send_cands(ctx: &Ctx, i: usize, r: &mut Ranker, settled: bool, force: bool) {
+    if let Some(cands) = r.to_send(settled, force) {
+        ctx.emit.emit(Event { i: Some(i), cands: Some(cands), settled, ..Event::new("candidates") });
+    }
 }
 
 /// The Soulseek part. None: not found here (try YouTube).
@@ -310,12 +312,11 @@ async fn soulseek(ctx: &Arc<Ctx>, c: &Client, i: usize, t: &Track, picks: &mut m
     }
     let mut second = queries.get(1).cloned();
     let mut open = true;
-    let mut last_sent = Instant::now() - Duration::from_secs(5);
-    let mut dirty = false;
-    // 1. Collect answers: stop early once there are enough good ones.
+    // 1. Collect answers. Most come in the first seconds; stop early once there are enough
+    // very good ones, else take what there is.
     loop {
         let el = t0.elapsed();
-        let enough = (el >= Duration::from_millis(1500) && ranker.good() >= 5) || (el >= Duration::from_secs(4) && ranker.good() >= 1) || el >= Duration::from_secs(7);
+        let enough = (el >= Duration::from_millis(2500) && ranker.excellent() >= 3) || (el >= Duration::from_secs(5) && ranker.good() >= 1) || el >= Duration::from_secs(8);
         if enough && !(ranker.cands.is_empty() && second.is_some()) {
             break;
         }
@@ -329,20 +330,16 @@ async fn soulseek(ctx: &Arc<Ctx>, c: &Client, i: usize, t: &Track, picks: &mut m
         }
         tokio::select! {
             r = answers.recv(), if open => match r {
-                Some(r) => dirty |= ranker.add(&r),
+                Some(r) => { ranker.add(&r); }
                 None => open = false,
             },
             _ = tokio::time::sleep(Duration::from_millis(200)) => {}
             _ = ctx.stop.cancelled() => return Some(End::Stopped),
         }
-        if dirty && last_sent.elapsed() >= Duration::from_millis(500) {
-            send_cands(ctx, i, &ranker, false);
-            last_sent = Instant::now();
-            dirty = false;
-        }
+        send_cands(ctx, i, &mut ranker, false, false);
     }
     drop(tx);
-    send_cands(ctx, i, &ranker, !manual);
+    send_cands(ctx, i, &mut ranker, !manual, true);
     ctx.emit.emit(Event::log(format!("{} - {}: {} files in {:.1} s", t.artist, t.title, ranker.cands.len(), t0.elapsed().as_secs_f32())));
     if ranker.cands.is_empty() {
         ctx.emit.emit(Event::track(i, "failed"));
@@ -361,11 +358,13 @@ async fn soulseek(ctx: &Arc<Ctx>, c: &Client, i: usize, t: &Track, picks: &mut m
                     tokio::select! {
                         p = picks.recv() => break p.unwrap_or(None),
                         r = answers.recv(), if open => match r {
-                            Some(r) => if ranker.add(&r) { send_cands(ctx, i, &ranker, false) },
-                            None => { open = false; send_cands(ctx, i, &ranker, true) },
+                            Some(r) => { ranker.add(&r); }
+                            None => { open = false; send_cands(ctx, i, &mut ranker, true, true) },
                         },
+                        _ = tokio::time::sleep(Duration::from_millis(250)) => {}
                         _ = ctx.stop.cancelled() => return Some(End::Stopped),
                     }
+                    send_cands(ctx, i, &mut ranker, !open, false);
                 },
             };
             match p {
@@ -408,7 +407,7 @@ async fn soulseek(ctx: &Arc<Ctx>, c: &Client, i: usize, t: &Track, picks: &mut m
             Fetch::Failed(why) => {
                 ctx.emit.emit(Event::log(format!("{} - {}: {} failed: {why}", t.artist, t.title, cand.user)));
                 ranker.mark_failed(id);
-                send_cands(ctx, i, &ranker, !manual || !open);
+                send_cands(ctx, i, &mut ranker, !manual || !open, true);
                 ctx.emit.emit(Event::track(i, "searching"));
             }
             Fetch::Stopped => return Some(End::Stopped),
@@ -513,9 +512,7 @@ async fn fetch(ctx: &Arc<Ctx>, c: &Client, i: usize, cand: &rank::Cand, picks: &
                 return Fetch::Switch(p);
             }
             r = answers.recv(), if *open => match r {
-                Some(r) => if ranker.add(&r) {
-                    send_cands(ctx, i, ranker, false);
-                },
+                Some(r) => { ranker.add(&r); }
                 None => *open = false,
             },
             _ = ctx.stop.cancelled() => {
@@ -523,11 +520,12 @@ async fn fetch(ctx: &Arc<Ctx>, c: &Client, i: usize, cand: &rank::Cand, picks: &
                 return Fetch::Stopped;
             }
             _ = tick.tick() => {
+                send_cands(ctx, i, ranker, !manual || !*open, false);
                 let waited = t0.elapsed().as_secs();
                 match started {
                     None => {
                         // It must start: soon from a free slot, a little later from a queue.
-                        let limit = if manual { 120 } else if queued { 25 } else { 15 };
+                        let limit = if manual { 120 } else if queued { 20 } else { 15 };
                         if waited > limit && (others > 0 || manual || waited > 60) {
                             return fail(&cancel, if queued { "still queued" } else { "did not start" });
                         }
@@ -543,6 +541,13 @@ async fn fetch(ctx: &Arc<Ctx>, c: &Client, i: usize, cand: &rank::Cand, picks: &
                             let left = cand.file.size.saturating_sub(bytes) as f64 / rate.max(1.0);
                             if rate < 25_000.0 && left > 90.0 {
                                 return fail(&cancel, &format!("too slow ({:.0} KB/s)", rate / 1000.0));
+                            }
+                            // A much faster file came in after this one started.
+                            if secs > 4.0 && left > 60.0 {
+                                let better = ranker.cands.iter().filter(|x| !x.failed && x.id != cand.id && x.free && x.fit >= 90).map(|x| x.eta()).min();
+                                if better.is_some_and(|eta| (eta as f64) * 3.0 < left) {
+                                    return fail(&cancel, "a much faster file came in");
+                                }
                             }
                         }
                     }

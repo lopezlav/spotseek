@@ -166,9 +166,6 @@ impl Emitter {
             let _ = out.flush();
         })
     }
-    pub fn none() -> Emitter {
-        Emitter::new(|_| {})
-    }
     pub fn emit(&self, e: Event) {
         (self.0)(&e)
     }
