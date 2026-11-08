@@ -303,7 +303,8 @@ pub struct State {
 
 impl State {
     pub fn new(handle: Option<AppHandle<State>>) -> State {
-        let settings = Settings::load();
+        // Tests never read the settings of the person who runs them.
+        let settings = if cfg!(test) { Settings::default() } else { Settings::load() };
         let demo = std::env::var_os("SPOTSEEK_DEMO").is_some_and(|v| v != "0");
         let persist = handle.is_some() && !demo;
         let wake = handle.clone();
