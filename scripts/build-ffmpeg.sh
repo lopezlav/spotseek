@@ -25,9 +25,11 @@
 #     macOS, the Windows DLLs that every Windows has, nothing on Linux).
 #   - No lavfi, no network, no hardware codecs, no assembler (nasm is not
 #     needed; the speed of audio decoding does not change much).
-#   - zlib is needed by the PNG decoder: ffmpeg must decode one frame of a
-#     PNG cover to know its size, else the MP3 muxer stops with
-#     "dimensions not set". The same is true for JPEG and BMP covers.
+#   - The mjpeg, png and bmp decoders are needed to keep the cover of MP3
+#     (ID3) and M4A files: ffmpeg decodes one frame of the picture to know
+#     its size, else the MP3 muxer stops with "dimensions not set". (A FLAC
+#     picture block gives the size, so FLAC covers do not need them.)
+#     zlib is needed by the PNG decoder.
 #
 # Tools that must be on the machine
 #   macOS:   Xcode command line tools, curl.
