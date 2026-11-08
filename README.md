@@ -13,7 +13,7 @@ it, pick another one, or listen to it while it downloads.
 ![The app window](docs/screenshots/5-downloading.png)
 
 The app and its download engine are written in Rust. The official downloads bundle
-the tools it needs (yt-dlp, ffmpeg, ffprobe, and Deno). The only extra thing you
+the tools it needs (yt-dlp, ffmpeg and Deno). The only extra thing you
 need is a **Soulseek account** for the Soulseek route.
 
 ## Install from the [GitHub releases page](https://github.com/lopezlav/spotseek/releases)
@@ -72,7 +72,7 @@ the app yourself, these tools must be on the machine, because the self-built
 app has no bundled copies:
 
 - **yt-dlp** - for the YouTube Music fallback.
-- **ffmpeg** and **ffprobe** - for the mp3 conversion.
+- **ffmpeg** - for the mp3 conversion (and to read what a file is).
 - **Deno** - JavaScript runtime needed by yt-dlp for full YouTube support.
 
 On macOS:
@@ -187,7 +187,7 @@ scripts/fetch-tools.sh build/bin darwin-arm64
 ## Build on Windows
 
 Build on a Windows machine with Rust (stable, MSVC toolchain), and put yt-dlp,
-ffmpeg and ffprobe on the PATH (or in a `bin` folder next to the program):
+ffmpeg on the PATH (or in a `bin` folder next to the program):
 
 ```bat
 cd engine && cargo build --release && cd ..

@@ -21,7 +21,7 @@ pub enum Plan {
     Encode(u32),
 }
 
-/// The audio facts ffprobe gives.
+/// The audio facts of a file (see `probe`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Probe {
     pub codec: String,
@@ -51,31 +51,41 @@ fn lossless_codec(c: &str) -> bool {
     c == "flac" || c == "alac" || c == "ape" || c == "wavpack" || c == "tta" || c == "mlp" || c.starts_with("pcm_")
 }
 
-/// Reads the codec and bitrate of the first audio stream.
-pub async fn probe(ffprobe: &str, path: &Path) -> Result<Probe> {
+/// Reads the codec and bitrate of the first audio stream. `ffmpeg -i` with no output prints the
+/// same facts ffprobe gives (the stream's bitrate, else the whole file's), so no ffprobe is bundled.
+pub async fn probe(ffmpeg: &str, path: &Path) -> Result<Probe> {
     let out = tokio::time::timeout(
         Duration::from_secs(30),
-        command(ffprobe)
-            .args(["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name,bit_rate:format=bit_rate", "-of", "json"])
-            .arg(path)
-            .output(),
+        command(ffmpeg).args(["-hide_banner", "-nostdin", "-i"]).arg(path).stdout(Stdio::null()).stderr(Stdio::piped()).output(),
     )
     .await??;
-    if !out.status.success() {
-        return Err(anyhow!("ffprobe: {}", String::from_utf8_lossy(&out.stderr).trim()));
-    }
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
-    let s = &v["streams"][0];
-    let codec = s["codec_name"].as_str().unwrap_or("").to_string();
+    // It exits with an error (no output file was given); the facts are on stderr all the same.
+    let text = String::from_utf8_lossy(&out.stderr);
+    parse_probe(&text).ok_or_else(|| anyhow!("no audio stream: {}", text.lines().last().unwrap_or("").trim()))
+}
+
+/// "123 kb/s" (or "123 kb/s (default)") → 123.
+fn kbps_in(part: &str) -> Option<u32> {
+    let mut w = part.split_whitespace();
+    let n = w.next()?.parse().ok()?;
+    (w.next()? == "kb/s").then_some(n)
+}
+
+/// The first audio stream in `ffmpeg -i` output:
+/// `Stream #0:0[0x1](und): Audio: aac (LC) (mp4a / 0x6134706D), 44100 Hz, stereo, fltp, 123 kb/s (default)`.
+pub fn parse_probe(text: &str) -> Option<Probe> {
+    let line = text.lines().find(|l| l.trim_start().starts_with("Stream #") && l.contains(": Audio: "))?;
+    let rest = &line[line.find(": Audio: ")? + ": Audio: ".len()..];
+    let codec: String = rest.chars().take_while(|c| !matches!(c, ' ' | ',')).collect();
     if codec.is_empty() {
-        return Err(anyhow!("no audio stream"));
+        return None;
     }
-    let br = |x: &serde_json::Value| x.as_str().and_then(|b| b.parse::<u64>().ok()).unwrap_or(0);
-    let mut bps = br(&s["bit_rate"]);
-    if bps == 0 {
-        bps = br(&v["format"]["bit_rate"]);
-    }
-    Ok(Probe { lossless: lossless_codec(&codec), codec, kbps: (bps / 1000) as u32 })
+    let file_kbps = || {
+        let l = text.lines().find(|l| l.trim_start().starts_with("Duration:"))?;
+        kbps_in(&l[l.find("bitrate: ")? + "bitrate: ".len()..])
+    };
+    let kbps = rest.split(", ").find_map(kbps_in).or_else(file_kbps).unwrap_or(0);
+    Some(Probe { lossless: lossless_codec(&codec), codec, kbps })
 }
 
 pub fn command(program: &str) -> Command {
@@ -119,14 +129,13 @@ pub struct Tags {
 
 pub struct Tools {
     pub ffmpeg: String,
-    pub ffprobe: String,
 }
 
 /// Converts `src` into a new mp3 in `dir` named `base`, at most `target` kbps. Returns the mp3
 /// and the bitrate it has.
 pub async fn to_mp3(tools: &Tools, src: &Path, dir: &Path, base: &str, target: u32, tags: &Tags) -> Result<(PathBuf, u32)> {
     tokio::fs::create_dir_all(dir).await?;
-    let p = probe(&tools.ffprobe, src).await?;
+    let p = probe(&tools.ffmpeg, src).await?;
     let dest = unique_dest(dir, base);
     let result = async {
         match plan(&p, target) {
@@ -225,6 +234,21 @@ mod tests {
     }
 
     #[test]
+    fn reads_ffmpeg_output() {
+        let m4a = "Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'c.m4a':\n  Duration: 00:00:03.00, start: 0.000000, bitrate: 127 kb/s\n  Stream #0:0[0x1](und): Audio: aac (LC) (mp4a / 0x6134706D), 44100 Hz, mono, fltp, 123 kb/s (default)\nAt least one output file must be specified";
+        assert_eq!(parse_probe(m4a), Some(p("aac", 123)));
+        let webm = "  Duration: 00:00:03.01, start: -0.007000, bitrate: 152 kb/s\n  Stream #0:0: Audio: opus, 48000 Hz, mono, fltp";
+        assert_eq!(parse_probe(webm), Some(p("opus", 152)), "no stream bitrate: the file's");
+        let wav = "Guessed Channel Layout for Input Stream #0.0 : mono\n  Duration: 00:00:03.00, bitrate: 705 kb/s\n  Stream #0:0: Audio: pcm_s16le ([1][0][0][0] / 0x0001), 44100 Hz, 1 channels, s16, 705 kb/s";
+        assert_eq!(parse_probe(wav), Some(p("pcm_s16le", 705)));
+        let mp3 = "  Duration: 00:03:21.03, start: 0.025057, bitrate: 330 kb/s\n  Stream #0:0: Audio: mp3 (mp3float), 44100 Hz, stereo, fltp, 320 kb/s\n  Stream #0:1: Video: mjpeg (Baseline), yuvj420p, 500x500, 90k tbr (attached pic)";
+        assert_eq!(parse_probe(mp3), Some(p("mp3", 320)), "the cover does not count");
+        let flac = "  Duration: 00:00:03.00, start: 0.000000, bitrate: 118 kb/s\n  Stream #0:0: Audio: flac, 44100 Hz, mono, s16";
+        assert!(parse_probe(flac).unwrap().lossless);
+        assert_eq!(parse_probe("x.jpg: Invalid data found when processing input"), None);
+    }
+
+    #[test]
     fn names() {
         assert_eq!(safe_name("AC/DC: Back in Black?"), "AC DC Back in Black");
         let dir = std::env::temp_dir().join(format!("spotseek-names-{}", std::process::id()));
@@ -236,14 +260,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// Needs ffmpeg and ffprobe on the PATH.
+    /// Needs ffmpeg on the PATH.
     #[tokio::test]
     async fn converts_real_files() {
         if std::process::Command::new("ffmpeg").arg("-version").output().is_err() {
             eprintln!("no ffmpeg: skipped");
             return;
         }
-        let tools = Tools { ffmpeg: "ffmpeg".into(), ffprobe: "ffprobe".into() };
+        let tools = Tools { ffmpeg: "ffmpeg".into() };
         let dir = std::env::temp_dir().join(format!("spotseek-conv-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mk = |name: &str, args: &[&str]| {
@@ -258,7 +282,11 @@ mod tests {
         let tags = Tags { artist: "Art".into(), title: "Song".into(), album: "Alb".into() };
         let (f, k) = to_mp3(&tools, &flac, &out, "Art - Song", 320, &tags).await.unwrap();
         assert_eq!(k, 320);
-        assert_eq!(probe("ffprobe", &f).await.unwrap().codec, "mp3");
+        let got = probe("ffmpeg", &f).await.unwrap();
+        assert_eq!((got.codec.as_str(), got.lossless), ("mp3", false));
+        assert!((300..=330).contains(&got.kbps), "{got:?}");
+        let got = probe("ffmpeg", &flac).await.unwrap();
+        assert_eq!((got.codec.as_str(), got.lossless), ("flac", true));
         let (m, k) = to_mp3(&tools, &mp3, &out, "Art - Song", 320, &tags).await.unwrap();
         assert!(k <= 130, "copied, not raised: {k}");
         assert_eq!(m.file_name().unwrap(), "Art - Song (1).mp3");

@@ -316,7 +316,6 @@ async fn run(args: Args) -> i32 {
         cover_out: (!args.cover_out.is_empty()).then(|| PathBuf::from(args.cover_out)),
         limit: args.limit,
         ffmpeg: "ffmpeg".into(),
-        ffprobe: "ffprobe".into(),
         ytdlp: "yt-dlp".into(),
         parallel: args.parallel.clamp(1, 16),
         state_dir: if args.state_dir.is_empty() { default_state_dir() } else { Some(PathBuf::from(&args.state_dir)) },
