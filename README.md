@@ -104,7 +104,15 @@ How the engine works (`engine/src`):
   the title does not have), is the sound good enough (lossless, or an mp3 at or above the
   bitrate you chose), and will it come fast (free upload slot, queue, the peer's speed,
   the time the file takes). The search stops early when there are enough good files.
-- `pipeline.rs` - all tracks at the same time (four downloads at once): search, take the
+- `store.rs` - what is kept between runs in the config folder: `peers.json` (peers that sent
+  good files: how many, how fast, which artists) and `search-cache.json` (search answers, 6 hours).
+- Searching less: Soulseek counts searches (34 every 220 s), never messages between peers. So
+  before a song spends a search, the engine looks for it for free: in the shares of the best
+  remembered peers (at the start of a run), and in the folder of a peer that has another song by the
+  same artist or from the same album (the artist's folder when it is one). Songs that turn up there
+  skip their search; songs waiting for the search limit give up their place when they turn up. A
+  song found that way still gets its real search when those files fail.
+- `pipeline.rs` - all tracks at the same time (8 downloads at once, YouTube at most 2): search, take the
   best file, and when it does not start in 15 seconds, stalls, or is much too slow while
   there are other files, take the next one. After six files, or when Soulseek has none,
   YouTube Music. Each track is converted the moment it lands.

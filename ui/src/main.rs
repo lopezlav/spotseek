@@ -303,6 +303,7 @@ fn demo_cands(t: &Track, seed: usize) -> Vec<backend::Cand> {
         score: 0.0,
         eta: (size / speed.max(40_000) as u64) as u32,
         failed: false,
+        known: user == "zwem",
     };
     let name = format!("{:02} - {} - {}", seed % 12 + 1, t.artist, t.title);
     vec![

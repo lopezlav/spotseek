@@ -87,6 +87,16 @@ impl Client {
         self.inner.offline_reason()
     }
 
+    /// Everything `user` shares, with full paths: a free peer message, not a search.
+    pub async fn browse(&self, user: &str, max: std::time::Duration) -> anyhow::Result<Vec<SharedFile>> {
+        self.inner.browse(user, max).await
+    }
+
+    /// The files of one folder of `user` (and its subfolders, as the peer sends them).
+    pub async fn browse_folder(&self, user: &str, folder: &str, max: std::time::Duration) -> anyhow::Result<Vec<SharedFile>> {
+        self.inner.browse_folder(user, folder, max).await
+    }
+
     /// True while the server connection is up.
     pub fn online(&self) -> bool {
         self.inner.online()

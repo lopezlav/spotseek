@@ -31,7 +31,11 @@ pub mod server {
 
 /// Peer message codes (on "P" connections).
 pub mod peer {
+    pub const SHARED_FILE_LIST_REQUEST: u32 = 4;
+    pub const SHARED_FILE_LIST_RESPONSE: u32 = 5;
     pub const FILE_SEARCH_RESPONSE: u32 = 9;
+    pub const FOLDER_CONTENTS_REQUEST: u32 = 36;
+    pub const FOLDER_CONTENTS_RESPONSE: u32 = 37;
     pub const TRANSFER_REQUEST: u32 = 40;
     pub const TRANSFER_RESPONSE: u32 = 41;
     pub const QUEUE_UPLOAD: u32 = 43;
@@ -436,6 +440,55 @@ pub fn parse_search_response(compressed: &[u8]) -> PResult<(u32, SearchResponse)
     Ok((token, SearchResponse { user, free_slot, avg_speed, queue_len, files }))
 }
 
+/// Asks a peer for the list of everything it shares (free: not a search).
+pub fn shared_file_list_request() -> Vec<u8> {
+    Writer::default().frame(peer::SHARED_FILE_LIST_REQUEST)
+}
+
+/// Asks a peer for the files of one of its folders (free: not a search).
+pub fn folder_contents_request(token: u32, folder: &str) -> Vec<u8> {
+    Writer::default().u32(token).str(folder).frame(peer::FOLDER_CONTENTS_REQUEST)
+}
+
+fn inflate(compressed: &[u8]) -> PResult<Vec<u8>> {
+    let mut data = Vec::new();
+    flate2::read::ZlibDecoder::new(compressed).take(MAX_INFLATED + 1).read_to_end(&mut data).map_err(|_| Malformed)?;
+    if data.len() as u64 > MAX_INFLATED {
+        return Err(Malformed);
+    }
+    Ok(data)
+}
+
+/// Folders, each with its files (file names without folder): the files with full paths.
+fn parse_dirs(r: &mut Reader) -> PResult<Vec<SharedFile>> {
+    let dirs = r.u32()? as usize;
+    let mut out = Vec::new();
+    for _ in 0..dirs {
+        let dir = r.str()?;
+        for mut f in parse_file_list(r)? {
+            let sep = if dir.contains('\\') || !dir.contains('/') { '\\' } else { '/' };
+            f.filename = format!("{}{sep}{}", dir.trim_end_matches(['\\', '/']), f.filename);
+            out.push(f);
+        }
+    }
+    Ok(out)
+}
+
+/// SharedFileListResponse (zlib): every public file a peer shares, with full paths.
+pub fn parse_shared_file_list(compressed: &[u8]) -> PResult<Vec<SharedFile>> {
+    let data = inflate(compressed)?;
+    parse_dirs(&mut Reader::new(&data))
+}
+
+/// FolderContentsResponse (zlib): the token, and the files of the folder (with full paths).
+pub fn parse_folder_contents(compressed: &[u8]) -> PResult<(u32, Vec<SharedFile>)> {
+    let data = inflate(compressed)?;
+    let mut r = Reader::new(&data);
+    let token = r.u32()?;
+    let _folder = r.str()?;
+    Ok((token, parse_dirs(&mut r)?))
+}
+
 fn parse_file_list(r: &mut Reader) -> PResult<Vec<SharedFile>> {
     let count = r.u32()? as usize;
     // Each file takes at least 21 bytes; do not trust the count for the allocation.
@@ -681,5 +734,31 @@ mod tests {
         assert_eq!(normalize_ext(".FLAC", "x"), "flac");
         assert_eq!(normalize_ext("", "a\\b.c\\noext"), "");
         assert_eq!(normalize_ext("", "a/.hidden"), "");
+    }
+
+    #[test]
+    fn share_lists_and_folders_have_full_paths() {
+        use std::io::Write;
+        let file = |w: Writer, name: &str| w.u8(1).str(name).u64(9_000_000).str("mp3").u32(2).u32(0).u32(320).u32(1).u32(200);
+        let mut w = Writer::default().u32(2).str("@@music\\Dillom\\Post Mortem").u32(2);
+        w = file(w, "01 - Coyote.mp3");
+        w = file(w, "02 - La Carie.mp3");
+        w = w.str("@@music\\Duki").u32(1);
+        w = file(w, "Cine.mp3");
+        let raw = w.u32(0).u32(0).into_inner();
+        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        z.write_all(&raw).unwrap();
+        let files = parse_shared_file_list(&z.finish().unwrap()).unwrap();
+        assert_eq!(files.len(), 3);
+        assert_eq!(files[0].filename, "@@music\\Dillom\\Post Mortem\\01 - Coyote.mp3");
+        assert_eq!((files[0].bitrate, files[0].duration), (Some(320), Some(200)));
+        assert_eq!(files[2].filename, "@@music\\Duki\\Cine.mp3");
+        let mut w = Writer::default().u32(77).str("@@music\\Duki").u32(1).str("@@music\\Duki").u32(1);
+        w = file(w, "Cine.mp3");
+        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        z.write_all(&w.into_inner()).unwrap();
+        let (token, files) = parse_folder_contents(&z.finish().unwrap()).unwrap();
+        assert_eq!(token, 77);
+        assert_eq!(files[0].filename, "@@music\\Duki\\Cine.mp3");
     }
 }

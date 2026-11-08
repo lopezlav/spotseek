@@ -14,6 +14,7 @@ mod pipeline;
 mod rank;
 mod slsk;
 mod spotify;
+mod store;
 mod youtube;
 
 use std::io::BufRead;
@@ -34,7 +35,8 @@ const HELP: &str = "spotseek-backend --cli <spotify-url> -o <dir> [options]
   --pass-stdin       read the Soulseek password from the first stdin line
   --cover-out FILE   with --events: save the collection cover there
   --limit N          only the first N tracks
-  --parallel N       downloads at the same time (default 4)
+  --parallel N       downloads at the same time (default 8; YouTube at most 2)
+  --state-dir DIR    keep the peer memory and the search cache here (default: the app's folder)
 
 spotseek-backend --cli --check-login --user NAME   (password on stdin)
 ";
@@ -56,10 +58,11 @@ struct Args {
     parallel: usize,
     check_login: bool,
     help: bool,
+    state_dir: String,
 }
 
 fn parse_args(args: &[String]) -> Result<Args, String> {
-    let mut a = Args { bitrate: 320, parallel: 4, ..Default::default() };
+    let mut a = Args { bitrate: 320, parallel: 8, ..Default::default() };
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         let (flag, inline) = match arg.split_once('=') {
@@ -82,6 +85,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             "limit" => a.limit = value("--limit")?.parse().map_err(|_| "bad --limit")?,
             "parallel" => a.parallel = value("--parallel")?.parse().map_err(|_| "bad --parallel")?,
             "check-login" => a.check_login = true,
+            "state-dir" => a.state_dir = value("--state-dir")?,
             "h" | "help" => a.help = true,
             // Old flags of the Go backend that mean nothing here.
             "timings" | "extract-only" => {}
@@ -112,6 +116,22 @@ fn parse_control(line: &str) -> Option<Control> {
         return Some(Control::Only(v.get("only").and_then(|o| o.as_array()).map(|a| a.iter().filter_map(|x| x.as_u64().map(|n| n as usize)).collect())));
     }
     None
+}
+
+/// The app's config folder (the same as the window's): `SPOTSEEK_CONFIG_DIR`, else the system's.
+fn default_state_dir() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("SPOTSEEK_CONFIG_DIR") {
+        return Some(PathBuf::from(p));
+    }
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from)?;
+    let base = if cfg!(target_os = "macos") {
+        home.join("Library").join("Application Support")
+    } else if cfg!(windows) {
+        std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or(home)
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".config"))
+    };
+    Some(base.join("Spotseek"))
 }
 
 /// The account in Sockseek's config file, when it has a user name and a password.
@@ -298,7 +318,8 @@ async fn run(args: Args) -> i32 {
         ffmpeg: "ffmpeg".into(),
         ffprobe: "ffprobe".into(),
         ytdlp: "yt-dlp".into(),
-        parallel: args.parallel.clamp(1, 8),
+        parallel: args.parallel.clamp(1, 12),
+        state_dir: if args.state_dir.is_empty() { default_state_dir() } else { Some(PathBuf::from(&args.state_dir)) },
     };
     match pipeline::run(o, emit.clone(), ctl_rx).await {
         Ok(()) => 0,

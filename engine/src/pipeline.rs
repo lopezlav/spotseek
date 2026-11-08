@@ -16,7 +16,9 @@ use crate::events::{Emitter, Event, TrackInfo};
 use crate::rank::{self, Ranker};
 use crate::slsk::{self, Client, ConnectError, Progress};
 use crate::spotify::{self, Track};
+use crate::store::{Store, folder_of};
 use crate::youtube::YtDlp;
+use std::collections::{HashMap, HashSet};
 
 pub struct Options {
     pub input: String,
@@ -35,8 +37,10 @@ pub struct Options {
     pub ffmpeg: String,
     pub ffprobe: String,
     pub ytdlp: String,
-    /// Downloads at the same time.
+    /// Downloads at the same time (Soulseek and YouTube together; YouTube at most 2).
     pub parallel: usize,
+    /// Where the peer memory and the search cache are kept (None: nothing is kept).
+    pub state_dir: Option<PathBuf>,
 }
 
 /// Messages from the app window (stdin lines).
@@ -74,6 +78,19 @@ struct Ctx {
     /// The run has more tracks than the server's search limit allows at once (34): every
     /// search counts, so no second search for a track.
     long_list: bool,
+    /// Peer memory and search cache.
+    store: Mutex<Store>,
+    /// Files found for a track without a search (in a peer's folder or shares), not read yet.
+    extra: Mutex<HashMap<usize, Vec<slsk::SearchResponse>>>,
+    /// Every track of the list, and the ones of this run that still need a file.
+    tracks: Vec<Track>,
+    active: Mutex<HashSet<usize>>,
+    /// Folders (user + path) already asked for.
+    browsed: Mutex<HashSet<String>>,
+    /// One track at a time waits for the search limit, in order; the others wait behind it.
+    search_gate: tokio::sync::Mutex<()>,
+    /// The shares of the remembered peers were looked at (or there were none).
+    memory_done: std::sync::atomic::AtomicBool,
 }
 
 /// The Soulseek session, which can be replaced after a reconnect.
@@ -274,7 +291,7 @@ async fn run_in(o: Options, emit: Emitter, mut controls: mpsc::UnboundedReceiver
         yt: YtDlp { bin: o.ytdlp.clone() },
         downloads: Semaphore::new(o.parallel.max(1)),
         converts: Semaphore::new((cpus / 2).clamp(2, 6)),
-        youtube: Semaphore::new(2),
+        youtube: Semaphore::new(2.min(o.parallel.max(1))),
         stop: stop.clone(),
         work: work.clone(),
         files: AtomicUsize::new(0),
@@ -282,6 +299,13 @@ async fn run_in(o: Options, emit: Emitter, mut controls: mpsc::UnboundedReceiver
         stuck: Mutex::default(),
         waiting_search: AtomicUsize::new(0),
         long_list: selected.len() > 30,
+        store: Mutex::new(Store::load(o.state_dir.clone())),
+        extra: Mutex::default(),
+        tracks: tracks.clone(),
+        active: Mutex::new(selected.iter().copied().collect()),
+        browsed: Mutex::default(),
+        search_gate: tokio::sync::Mutex::new(()),
+        memory_done: std::sync::atomic::AtomicBool::new(false),
         session,
         emit: emit.clone(),
         o,
@@ -292,6 +316,8 @@ async fn run_in(o: Options, emit: Emitter, mut controls: mpsc::UnboundedReceiver
         tokio::spawn(keep_online(ctx.clone(), watch.clone()));
     }
     tokio::spawn(watch_search_limit(ctx.clone(), watch.clone()));
+    // First look in the shares of peers that sent us good files before: no search needed.
+    tokio::spawn(browse_memory(ctx.clone()));
 
     let mut jobs = tokio::task::JoinSet::new();
     {
@@ -306,6 +332,7 @@ async fn run_in(o: Options, emit: Emitter, mut controls: mpsc::UnboundedReceiver
     }
     while jobs.join_next().await.is_some() {}
     watch.cancel();
+    ctx.store.lock().unwrap().save();
 
     let files = ctx.files.load(Ordering::SeqCst);
     let missing = ctx.missing.load(Ordering::SeqCst);
@@ -433,6 +460,8 @@ async fn track_job(ctx: Arc<Ctx>, i: usize, t: Track, mut picks: mpsc::Unbounded
         None if ctx.o.fallback => youtube(&ctx, i, &t).await,
         None => End::Missing,
     };
+    // Its file is settled: folders looked at later do not look for it.
+    ctx.active.lock().unwrap().remove(&i);
     if end == End::Missing {
         ctx.missing.fetch_add(1, Ordering::SeqCst);
         ctx.emit.emit(Event::track(i, "missing"));
@@ -454,36 +483,87 @@ async fn soulseek(ctx: &Arc<Ctx>, client: Client, i: usize, t: &Track, picks: &m
     let manual = ctx.o.manual;
     ctx.emit.emit(Event::track(i, "searching"));
     let mut ranker = Ranker::new(t.clone(), ctx.o.bitrate);
+    ranker.known = ctx.store.lock().unwrap().peers.iter().filter(|(_, p)| p.hits > 0).map(|(u, _)| u.clone()).collect();
     let (tx, mut answers) = mpsc::unbounded_channel();
     let queries = rank::queries(t);
     // Answers keep coming in while the track waits or downloads: more choices if one fails.
     let window = Duration::from_secs(if manual { 30 } else { 20 });
-    // This can wait a long time for the server's search limit; the clock starts when it is sent.
-    ctx.waiting_search.fetch_add(1, Ordering::SeqCst);
-    let mut sent = start_search(c, &queries[0], window, ctx.stop.clone(), tx.clone()).await;
-    if sent.is_err() {
-        // The session dropped: wait for the reconnect, then once more.
-        if let Some(n) = ctx.session.ready(&ctx.stop, Duration::from_secs(120)).await {
-            *c = n;
-            sent = start_search(c, &queries[0], window, ctx.stop.clone(), tx.clone()).await;
+    // The remembered peers are asked first (a few seconds at most).
+    let wait_memory = Instant::now();
+    while !ctx.memory_done.load(Ordering::SeqCst) && wait_memory.elapsed() < Duration::from_secs(6) {
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+            _ = ctx.stop.cancelled() => return Some(End::Stopped),
         }
     }
-    ctx.waiting_search.fetch_sub(1, Ordering::SeqCst);
-    if let Err(e) = sent {
-        ctx.emit.emit(Event::log(format!("search failed: {e}")));
-        return None;
+    // How it was found: "search", "cache", or without a search ("free").
+    let mut how = "search";
+    take_extra(ctx, i, &mut ranker);
+    if ranker.enough_without_search() {
+        how = "free";
+    } else {
+        // Searches cost (34 every 220 s): wait in line, and give up the place when the song
+        // turns up in a peer's folder meanwhile.
+        ctx.waiting_search.fetch_add(1, Ordering::SeqCst);
+        let gate = tokio::select! {
+            g = ctx.search_gate.lock() => g,
+            _ = ctx.stop.cancelled() => { ctx.waiting_search.fetch_sub(1, Ordering::SeqCst); return Some(End::Stopped) }
+        };
+        loop {
+            take_extra(ctx, i, &mut ranker);
+            if ranker.enough_without_search() {
+                how = "free";
+                break;
+            }
+            let wait = slsk::search_wait();
+            if wait.is_zero() {
+                break;
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(wait.min(Duration::from_millis(500))) => {}
+                _ = ctx.stop.cancelled() => { ctx.waiting_search.fetch_sub(1, Ordering::SeqCst); return Some(End::Stopped) }
+            }
+        }
+        if how == "search" {
+            let cached = ctx.store.lock().unwrap().cached(&queries[0]);
+            if let Some(answers) = cached {
+                how = "cache";
+                for r in answers {
+                    ranker.add(&r);
+                }
+            }
+        }
+        let mut sent = Ok(());
+        if how == "search" {
+            sent = start_search(c, &queries[0], window, ctx.stop.clone(), tx.clone()).await;
+            if sent.is_err() {
+                // The session dropped: wait for the reconnect, then once more.
+                if let Some(n) = ctx.session.ready(&ctx.stop, Duration::from_secs(120)).await {
+                    *c = n;
+                    sent = start_search(c, &queries[0], window, ctx.stop.clone(), tx.clone()).await;
+                }
+            }
+        }
+        drop(gate);
+        ctx.waiting_search.fetch_sub(1, Ordering::SeqCst);
+        if let Err(e) = sent {
+            ctx.emit.emit(Event::log(format!("search failed: {e}")));
+            return None;
+        }
     }
     if ctx.stop.is_cancelled() {
         return Some(End::Stopped);
     }
+    let searched = how == "search";
+    let mut heard: Vec<slsk::SearchResponse> = Vec::new();
     let mut t0 = Instant::now();
     // A second search (without the artist) only for short lists: on long ones it takes the
     // place of another song's first search.
-    let mut second = if ctx.long_list { None } else { queries.get(1).cloned() };
-    let mut open = true;
+    let mut second = if ctx.long_list || !searched { None } else { queries.get(1).cloned() };
+    let mut open = searched;
     // 1. Collect answers. Most come in the first seconds; stop early once there are enough
-    // very good ones, else take what there is.
-    loop {
+    // very good ones, else take what there is. Found without a search: nothing to wait for.
+    while searched {
         let el = t0.elapsed();
         let enough = (el >= Duration::from_millis(2500) && ranker.excellent() >= 3) || (el >= Duration::from_secs(5) && ranker.good() >= 1) || el >= Duration::from_secs(8);
         if enough && !(ranker.cands.is_empty() && second.is_some()) {
@@ -501,18 +581,31 @@ async fn soulseek(ctx: &Arc<Ctx>, client: Client, i: usize, t: &Track, picks: &m
         }
         tokio::select! {
             r = answers.recv(), if open => match r {
-                Some(r) => { ranker.add(&r); }
+                Some(r) => {
+                    ranker.add(&r);
+                    heard.push(r);
+                }
                 None => open = false,
             },
             _ = tokio::time::sleep(Duration::from_millis(200)) => {}
             _ = ctx.stop.cancelled() => return Some(End::Stopped),
         }
+        take_extra(ctx, i, &mut ranker);
         send_cands(ctx, i, &mut ranker, false, false);
     }
     drop(tx);
     // What already came in counts.
     while let Ok(r) = answers.try_recv() {
         ranker.add(&r);
+        heard.push(r);
+    }
+    if searched && !heard.is_empty() {
+        ctx.store.lock().unwrap().cache(&queries[0], &heard);
+    }
+    drop(heard);
+    if how != "search" {
+        let peer = ranker.next().map(|c| c.user.clone()).unwrap_or_default();
+        ctx.note("found_free", "good", Some(i), &peer, how, ranker.cands.len(), 0, format!("{} - {}: {} files without a search ({how})", t.artist, t.title, ranker.cands.len()));
     }
     send_cands(ctx, i, &mut ranker, !manual, true);
     let line = format!("{} - {}: {} files in {:.1} s", t.artist, t.title, ranker.cands.len(), t0.elapsed().as_secs_f32());
@@ -521,7 +614,11 @@ async fn soulseek(ctx: &Arc<Ctx>, client: Client, i: usize, t: &Track, picks: &m
         ctx.emit.emit(Event::track(i, "failed"));
         return None;
     }
-    ctx.note("found", "info", Some(i), "", "", ranker.cands.len(), t0.elapsed().as_secs() as u32, line);
+    if searched {
+        ctx.note("found", "info", Some(i), "", "", ranker.cands.len(), t0.elapsed().as_secs() as u32, line);
+    }
+    // Found without a search: the real search stays possible when those files fail.
+    let mut can_search = !searched;
 
     // 2. Download: the best, then the next ones (or what the user picks).
     let mut pending: Option<Pick> = None;
@@ -566,6 +663,16 @@ async fn soulseek(ctx: &Arc<Ctx>, client: Client, i: usize, t: &Track, picks: &m
             }
         };
         let Some(id) = pick else {
+            if can_search {
+                // The files found without a search failed: search now, once.
+                can_search = false;
+                ctx.emit.emit(Event::track(i, "searching"));
+                late_search(ctx, c, &queries[0], window, &mut ranker).await;
+                send_cands(ctx, i, &mut ranker, true, true);
+                if ranker.next().is_some() {
+                    continue;
+                }
+            }
             ctx.emit.emit(Event::track(i, "failed"));
             return None;
         };
@@ -577,11 +684,15 @@ async fn soulseek(ctx: &Arc<Ctx>, client: Client, i: usize, t: &Track, picks: &m
             return None;
         }
         let others = ranker.cands.iter().filter(|x| !x.failed && x.id != id).count();
+        // The peer has this song: its folder may have the next ones of the list (free).
+        browse_folder_of(ctx, c.clone(), i, &cand.user, &cand.file.filename);
         match fetch(ctx, &c.clone(), i, &cand, picks, others, (&mut answers, &mut open), &mut ranker).await {
             Fetch::Done(path, secs) => {
                 // It sends after all (it was only busy with another of our files).
                 ctx.stuck.lock().unwrap().remove(&cand.user);
                 ctx.note("downloaded", "good", Some(i), &cand.user, "", 0, secs, format!("{} - {}: downloaded from {} in {secs} s", t.artist, t.title, cand.user));
+                ctx.store.lock().unwrap().hit(&cand.user, cand.file.size, secs as f64, &rank::norm(rank::main_artist(&t.artist)));
+                ctx.active.lock().unwrap().remove(&i);
                 ctx.emit.emit(Event { peer: cand.user.clone(), source: "soulseek".into(), total: cand.file.size, bitrate: rank::kbps(&cand.file), cand: Some(id), ..Event::track(i, "done") });
                 return Some(finish(ctx, i, t, &path).await);
             }
@@ -606,6 +717,7 @@ async fn soulseek(ctx: &Arc<Ctx>, client: Client, i: usize, t: &Track, picks: &m
                     }
                 }
                 ctx.note("peer_failed", "warn", Some(i), &cand.user, code, 0, 0, line);
+                ctx.store.lock().unwrap().fail(&cand.user);
                 ranker.mark_failed(id);
                 if code == "queued" || code == "no_start" {
                     ctx.stuck.lock().unwrap().insert(cand.user.clone());
@@ -796,8 +908,13 @@ async fn finish(ctx: &Arc<Ctx>, i: usize, t: &Track, src: &Path) -> End {
 
 /// The YouTube Music fallback.
 async fn youtube(ctx: &Arc<Ctx>, i: usize, t: &Track) -> End {
+    // At most 2 from YouTube (more from one address gets blocked), out of the shared budget.
     let _permit = tokio::select! {
         p = ctx.youtube.acquire() => p,
+        _ = ctx.stop.cancelled() => return End::Stopped,
+    };
+    let _slot = tokio::select! {
+        p = ctx.downloads.acquire() => p,
         _ = ctx.stop.cancelled() => return End::Stopped,
     };
     ctx.emit.emit(Event { source: "youtube".into(), ..Event::track(i, "yt_search") });
@@ -842,4 +959,133 @@ async fn youtube(ctx: &Arc<Ctx>, i: usize, t: &Track) -> End {
 /// YouTube asks yt-dlp to prove it is not a bot (too many requests from this address).
 fn yt_blocked(e: &str) -> bool {
     e.contains("not a bot") || e.contains("Sign in to confirm") || e.contains("HTTP Error 429")
+}
+
+/// Moves the files found without a search for track `i` into its ranker.
+fn take_extra(ctx: &Ctx, i: usize, ranker: &mut Ranker) {
+    let found = ctx.extra.lock().unwrap().remove(&i);
+    for r in found.into_iter().flatten() {
+        ranker.add(&r);
+    }
+}
+
+/// Files of `user` that fit tracks of this run that still need one become their candidates.
+/// Returns how many tracks got one.
+fn match_files(ctx: &Ctx, user: &str, speed: u32, files: &[slsk::SharedFile], except: usize) -> usize {
+    let active: Vec<usize> = ctx.active.lock().unwrap().iter().copied().filter(|&j| j != except).collect();
+    let mut extra = ctx.extra.lock().unwrap();
+    let mut n = 0;
+    for j in active {
+        let t = &ctx.tracks[j];
+        let mut fit: Vec<(u32, &slsk::SharedFile)> = files.iter().filter(|f| rank::is_audio(&f.ext) && f.size >= 500_000).map(|f| (rank::fit(t, f), f)).filter(|(s, _)| *s >= 85).collect();
+        if fit.is_empty() {
+            continue;
+        }
+        fit.sort_by(|a, b| b.0.cmp(&a.0));
+        // It just answered us: count it as free, with the speed we know.
+        let resp = slsk::SearchResponse { user: user.to_string(), free_slot: true, avg_speed: speed, queue_len: 0, files: fit.into_iter().take(4).map(|(_, f)| f.clone()).collect() };
+        extra.entry(j).or_default().push(resp);
+        n += 1;
+    }
+    n
+}
+
+/// When the list has more songs by the same artist (or from the same album) that still need a
+/// file, asks the peer for this song's folder (the artist's folder when it is one) and matches
+/// them there. A free peer message, not a search.
+fn browse_folder_of(ctx: &Arc<Ctx>, c: Client, i: usize, user: &str, file: &str) {
+    let t = &ctx.tracks[i];
+    let artist = rank::norm(rank::main_artist(&t.artist));
+    let others = ctx.active.lock().unwrap().iter().any(|&j| {
+        let o = &ctx.tracks[j];
+        j != i && (rank::norm(rank::main_artist(&o.artist)) == artist || (!t.album.is_empty() && o.album == t.album))
+    });
+    if !others || artist.is_empty() {
+        return;
+    }
+    let mut folder = folder_of(file).to_string();
+    let parent = folder_of(&folder);
+    let parent_name = parent.rsplit(['\\', '/']).next().unwrap_or("");
+    if !parent.is_empty() && rank::norm(parent_name).contains(&artist) {
+        // "…\Artist\Album\song": the artist's folder has the other albums too.
+        folder = parent.to_string();
+    }
+    if !ctx.browsed.lock().unwrap().insert(format!("{user}\u{0}{folder}")) {
+        return;
+    }
+    let (ctx, user) = (ctx.clone(), user.to_string());
+    let speed = ctx.store.lock().unwrap().peers.get(&user).map(|p| p.speed()).unwrap_or(0);
+    tokio::spawn(async move {
+        let Ok(files) = c.browse_folder(&user, &folder, Duration::from_secs(20)).await else { return };
+        let n = match_files(&ctx, &user, speed, &files, i);
+        ctx.emit.emit(Event::log(format!("{user}: {} files in {folder}, {n} songs of the list", files.len())));
+        if n > 0 {
+            ctx.note("browsed", "good", None, &user, "", n, 0, format!("{user}'s folder has {n} more songs of the list: no search needed"));
+        }
+    });
+}
+
+/// Looks in the shares of the peers that sent us good files before (best first, those with the
+/// run's artists first). Songs found there need no search.
+async fn browse_memory(ctx: Arc<Ctx>) {
+    let done = |ctx: &Ctx| ctx.memory_done.store(true, Ordering::SeqCst);
+    let Some(c) = ctx.session.ready(&ctx.stop, Duration::from_secs(30)).await else { return done(&ctx) };
+    let artists: Vec<String> = ctx.active.lock().unwrap().iter().map(|&j| rank::norm(rank::main_artist(&ctx.tracks[j].artist))).collect();
+    let peers = ctx.store.lock().unwrap().best_peers(6, &artists);
+    if peers.is_empty() {
+        return done(&ctx);
+    }
+    let mut set = tokio::task::JoinSet::new();
+    for (user, p) in peers.clone() {
+        let c = c.clone();
+        set.spawn(async move { (user.clone(), p.speed(), c.browse(&user, Duration::from_secs(25)).await) });
+    }
+    let (mut answered, mut found) = (0usize, HashSet::new());
+    let before: HashSet<usize> = ctx.extra.lock().unwrap().keys().copied().collect();
+    while let Some(r) = set.join_next().await {
+        let Ok((user, speed, Ok(files))) = r else { continue };
+        answered += 1;
+        let n = match_files(&ctx, &user, speed, &files, usize::MAX);
+        ctx.emit.emit(Event::log(format!("{user}: shares {} files, {n} songs of the list", files.len())));
+        found.extend(ctx.extra.lock().unwrap().keys().copied().filter(|k| !before.contains(k)));
+        // The songs that are found can skip their search at once.
+        if found.len() >= ctx.active.lock().unwrap().len() {
+            break;
+        }
+    }
+    done(&ctx);
+    ctx.note("memory", if found.is_empty() { "info" } else { "good" }, None, "", &answered.to_string(), found.len(), 0, format!("Looked in the shares of {answered} of {} known peers: {} songs found without a search", peers.len(), found.len()));
+}
+
+/// A search for a track whose files found without a search all failed: waits in line for the
+/// search limit, then collects answers for a few seconds.
+async fn late_search(ctx: &Arc<Ctx>, c: &mut Client, query: &str, window: Duration, ranker: &mut Ranker) {
+    ctx.waiting_search.fetch_add(1, Ordering::SeqCst);
+    let gate = ctx.search_gate.lock().await;
+    while !slsk::search_wait().is_zero() && !ctx.stop.is_cancelled() {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    if !c.online() {
+        if let Some(n) = ctx.session.ready(&ctx.stop, Duration::from_secs(120)).await {
+            *c = n;
+        }
+    }
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let sent = start_search(c, query, window, ctx.stop.clone(), tx).await;
+    drop(gate);
+    ctx.waiting_search.fetch_sub(1, Ordering::SeqCst);
+    if sent.is_err() {
+        return;
+    }
+    let end = tokio::time::Instant::now() + Duration::from_secs(6);
+    loop {
+        tokio::select! {
+            r = rx.recv() => match r {
+                Some(r) => { ranker.add(&r); }
+                None => break,
+            },
+            _ = tokio::time::sleep_until(end) => break,
+            _ = ctx.stop.cancelled() => break,
+        }
+    }
 }

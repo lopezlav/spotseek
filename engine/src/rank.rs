@@ -199,6 +199,8 @@ pub struct Cand {
     pub fit: u32,
     pub score: f32,
     pub failed: bool,
+    /// The peer sent us good files before.
+    pub known: bool,
 }
 
 impl Cand {
@@ -231,6 +233,7 @@ impl Cand {
             score: (self.score * 10.0).round() / 10.0,
             eta: if self.speed > 0 { self.eta() } else { 0 },
             failed: self.failed,
+            known: self.known,
         }
     }
 }
@@ -268,11 +271,13 @@ pub struct Ranker {
     sent: Vec<CandInfo>,
     sent_at: Option<std::time::Instant>,
     sent_settled: bool,
+    /// Peers that sent us good files before: a little more trust.
+    pub known: std::collections::HashSet<String>,
 }
 
 impl Ranker {
     pub fn new(track: Track, target: u32) -> Ranker {
-        Ranker { track, target, cands: Vec::new(), next_id: 0, sent: Vec::new(), sent_at: None, sent_settled: false }
+        Ranker { track, target, cands: Vec::new(), next_id: 0, sent: Vec::new(), sent_at: None, sent_settled: false, known: Default::default() }
     }
 
     /// Adds a peer's answer. True when a new file fits.
@@ -289,8 +294,9 @@ impl Ranker {
             if self.cands.iter().any(|c| c.user == r.user && c.file.filename == f.filename) {
                 continue;
             }
-            let score = score(fit, f, r.free_slot, r.avg_speed, r.queue_len, self.target);
-            self.cands.push(Cand { id: self.next_id, user: r.user.clone(), file: f.clone(), free: r.free_slot, speed: r.avg_speed, queue: r.queue_len, fit, score, failed: false });
+            let known = self.known.contains(&r.user);
+            let score = score(fit, f, r.free_slot, r.avg_speed, r.queue_len, self.target) + if known { 8.0 } else { 0.0 };
+            self.cands.push(Cand { id: self.next_id, user: r.user.clone(), file: f.clone(), free: r.free_slot, speed: r.avg_speed, queue: r.queue_len, fit, score, failed: false, known });
             self.next_id += 1;
             added = true;
         }
@@ -318,6 +324,11 @@ impl Ranker {
     /// Good candidates: likely the song, from a peer with a free slot.
     pub fn good(&self) -> usize {
         self.cands.iter().filter(|c| !c.failed && c.free && c.fit >= 75).count()
+    }
+
+    /// Found without a search is enough when one file surely is the song and its sound is good.
+    pub fn enough_without_search(&self) -> bool {
+        self.cands.iter().any(|c| !c.failed && c.fit >= 85 && quality(&c.file, self.target) >= 0.75)
     }
 
     /// Very good candidates: surely the song, a free peer, the full sound, and a short download.
