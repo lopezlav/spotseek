@@ -296,6 +296,8 @@ pub struct State {
     pub log_tech: bool,
     /// The Soulseek session dropped and the engine signs in again.
     pub soulseek_down: bool,
+    /// The track that plays because the mouse is over it.
+    pub hover_started: Option<usize>,
     pub media: Media,
 }
 
@@ -370,6 +372,7 @@ impl State {
             log_open: false,
             log_tech: false,
             soulseek_down: false,
+            hover_started: None,
             media,
         }
     }
@@ -1015,6 +1018,10 @@ impl State {
     /// The window got or lost focus. Back in front, the user gets a few seconds at least.
     pub fn set_focus(&mut self, focused: bool) {
         self.focused = focused;
+        if !focused {
+            // A hover play stops when the window goes to the back.
+            self.stop_hover();
+        }
         if let (true, Some((left, _))) = (focused, self.countdown.as_mut()) {
             *left = left.max(4.0);
         }
@@ -1065,6 +1072,63 @@ impl State {
         if self.persist {
             self.settings.save();
         }
+    }
+
+    /// The file of track `i` that can play now: the mp3, the one already in the folder, or the
+    /// part of a Soulseek download that is on disk.
+    pub fn playable(&self, i: usize) -> Option<String> {
+        let t = self.tracks.get(i)?;
+        if !t.path.is_empty() && !t.path.starts_with("demo://") {
+            return Some(t.path.clone());
+        }
+        if !t.have.is_empty() && !t.have.starts_with("demo://") {
+            return Some(t.have.clone());
+        }
+        if t.previewable() && matches!(t.state, TState::Downloading | TState::Done) && self.media.growing(&t.part).is_some_and(|g| g.complete() || g.playable() >= 2.0) {
+            return Some(t.part.clone());
+        }
+        None
+    }
+
+    /// The mouse came over track `i` (`true`) or left it. With hover play on, it plays from
+    /// where it was left, and pauses when the mouse leaves (not while its details are open).
+    pub fn hover_track(&mut self, i: usize, on: bool) {
+        if !self.settings.hover_play || self.demo {
+            return;
+        }
+        if on {
+            let Some(path) = self.playable(i) else { return };
+            self.media.hover(&path, true);
+            self.hover_started = Some(i);
+        } else if self.hover_started == Some(i) {
+            if self.open.as_deref() == Some(format!("c{i}").as_str()) {
+                return;
+            }
+            self.stop_hover();
+        }
+    }
+
+    /// Pauses what a hover started.
+    pub fn stop_hover(&mut self) {
+        if self.hover_started.take().is_some() {
+            self.media.pause();
+        }
+    }
+
+    /// PLAY: ON CLICK / ON HOVER. Turning it off pauses what a hover started; turning it on the
+    /// first time says how it works.
+    pub fn set_hover_play(&mut self, on: bool) {
+        if self.settings.hover_play == on {
+            return;
+        }
+        self.settings.hover_play = on;
+        if on {
+            let hint = self.lang.t("Move the mouse over a song to hear it. Space pauses.", "Pasá el mouse por una canción para oírla. Espacio pausa.").to_string();
+            self.push_note(Level::Info, hint, String::new(), None);
+        } else {
+            self.stop_hover();
+        }
+        self.save_settings();
     }
 
     /// The track whose file plays (or is loaded in the player).
@@ -1652,5 +1716,52 @@ mod tests {
         assert_eq!(s.notes.last().unwrap().level, Level::Tech);
         assert_eq!(s.latest_note().unwrap().level, Level::Good, "the footer shows the last note for people");
         assert!(s.notes.iter().any(|n| n.level == Level::Bad && n.text.contains("somewhere else")));
+    }
+
+    #[test]
+    fn hover_play_starts_pauses_and_remembers_without_sound() {
+        let ev = |line: &str| backend::parse(line).unwrap();
+        let mut s = State::new(None);
+        s.phase = Phase::Running;
+        s.apply(ev(r#"{"ev":"collection","name":"A","kind":"playlist","tracks":[{"artist":"A","title":"One","duration":200},{"artist":"B","title":"Two","duration":200}]}"#));
+        s.apply(ev(r#"{"ev":"track","i":0,"state":"done","source":"soulseek"}"#));
+        s.apply(ev(r#"{"ev":"file","i":0,"path":"/out/A - One.mp3"}"#));
+        // Off: hovering does nothing.
+        s.hover_track(0, true);
+        assert!(s.media.sent().is_empty());
+        s.set_hover_play(true);
+        assert!(s.notes.last().unwrap().text.contains("mouse"), "the first time says how it works");
+        s.hover_track(1, true);
+        assert!(s.media.sent().is_empty(), "a track with nothing to play stays silent");
+        s.hover_track(0, true);
+        assert_eq!(s.media.sent(), ["play /out/A - One.mp3 0.0"]);
+        assert_eq!(s.hover_started, Some(0));
+        // The silent media does not play, so fake the status, then leave.
+        s.media.fake_status(crate::media::Status { path: "/out/A - One.mp3".into(), playing: true, pos: 42.0, dur: 200.0, ..Default::default() });
+        s.hover_track(0, false);
+        assert_eq!(s.media.sent().last().unwrap(), "pause");
+        assert_eq!(s.hover_started, None);
+        // Leaving into its own open details does not pause.
+        s.open = Some("c0".into());
+        s.hover_track(0, true);
+        s.hover_track(0, false);
+        assert_eq!(s.hover_started, Some(0));
+        // Turning it off pauses what the hover started.
+        s.set_hover_play(false);
+        assert_eq!(s.hover_started, None);
+        assert_eq!(s.media.sent().last().unwrap(), "pause");
+    }
+
+    #[test]
+    fn the_place_a_preview_was_left_goes_to_the_mp3() {
+        let ev = |line: &str| backend::parse(line).unwrap();
+        let mut s = State::new(None);
+        s.phase = Phase::Running;
+        s.apply(ev(r#"{"ev":"collection","name":"A","kind":"playlist","tracks":[{"artist":"A","title":"One","duration":200}]}"#));
+        s.apply(ev(r#"{"ev":"track","i":0,"state":"downloading","total":8000000,"path":"/work/0-1.mp3","format":"mp3","cand":1}"#));
+        s.media.fake_status(crate::media::Status { path: "/work/0-1.mp3".into(), playing: false, pos: 61.0, dur: 200.0, ..Default::default() });
+        s.apply(ev(r#"{"ev":"track","i":0,"state":"done","cand":1}"#));
+        s.apply(ev(r#"{"ev":"file","i":0,"path":"/out/A - One.mp3"}"#));
+        assert_eq!(s.media.position("/out/A - One.mp3"), Some(61.0));
     }
 }

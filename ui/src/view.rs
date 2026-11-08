@@ -198,6 +198,24 @@ fn pick_toggle(s: &State) -> El {
             .child(part("pick-manual", l.t("I PICK", "ELIJO YO"), s.settings.manual, true)))
 }
 
+/// PLAY: ON CLICK / ON HOVER, in the footer of the download screen (away from the track grid,
+/// so reaching it does not sweep over songs). The live mode fills red.
+fn play_toggle(s: &State) -> El {
+    let l = s.lang;
+    let part = |key: &str, label: &str, on: bool, live: bool, hover: bool| {
+        row().key(key).h(24.0).px(8.0).center().cursor(Cursor::Pointer).role("button").label(label)
+            .fill(if on { if live { red() } else { ink() } } else { Color::TRANSPARENT })
+            .on_press(move |s: &mut State| s.set_hover_play(hover))
+            .child(text(label.to_string()).font(mono(12.0, 600.0)).color(if on { paper() } else { ink() }))
+    };
+    let hover = s.settings.hover_play;
+    row().key("play-mode").gap(8.0).center_y()
+        .child(text(l.t("PLAY:", "SONAR:")).font(mono(12.0, 600.0)).color(muted()))
+        .child(row().border(2.0, ink())
+            .child(part("play-click", l.t("ON CLICK", "AL CLIC"), !hover, false, false))
+            .child(part("play-hover", l.t("ON HOVER", "AL PASAR"), hover, true, true)))
+}
+
 // ------------------------------------------------------------------ 2. working
 
 fn fmt_speed(b: f32) -> String {
@@ -331,6 +349,7 @@ fn working(s: &State, size: [f32; 2]) -> El {
                 _ => l.t("BACK", "VOLVER"),
             }).font(mono(13.0, 600.0)).color(ink())))
         .child(now_playing(s))
+        .child(play_toggle(s))
         .child(log_line(s))
         .child(text("SPOTSEEK").font(mono(13.0, 600.0)).color(ink()));
 
@@ -684,7 +703,7 @@ fn cell(s: &State, i: usize, t: &Track, open: bool, width: f32) -> El {
     if sounding {
         // Room for the number, the speaker and the chip.
         let w = (width - 12.0 - 36.0 - 20.0 - mono_w(&chip, 11.0) - 8.0 - 10.0).max(40.0);
-        label = row().w(w).mr(10.0).child(ticker("title", &title, w, 12.5, 600.0, fg, s.now));
+        label = row().w(w).mr(16.0).child(ticker("title", &title, w, 12.5, 600.0, fg, s.now));
     }
     let mut chip_el = text(chip).font(mono(11.0, 600.0)).color(fg).ml(8.0);
     if choosing || matches!(t.state, TState::Searching | TState::Failed | TState::YtSearch | TState::YtDownload) {
@@ -693,6 +712,12 @@ fn cell(s: &State, i: usize, t: &Track, open: bool, width: f32) -> El {
     let mut r = row().key(format!("t{i}")).w_full().h(24.0).pl(6.0).pr(6.0).center_y().fill(bg)
         .cursor(Cursor::Pointer).role("button").label(format!("{} details", t.title))
         .on_press_tx(open_on_press(format!("c{i}")))
+        // Hover play: a short wait, so sweeping the mouse across the grid plays nothing.
+        .on_hover_change(move |s: &mut State, inside: bool, tx: &mut Tx| {
+            s.hover_track(i, inside);
+            tx.wake_after(std::time::Duration::from_millis(60));
+        })
+        .hover_delays(std::time::Duration::from_millis(80), std::time::Duration::ZERO)
         .motion(Spring::new(0.35, 0.1))
         .transition(Transition::offset(0.0, 12.0).combined(Transition::opacity()))
         .enter_delay((i as f32 * 0.018).min(1.2));
@@ -708,8 +733,17 @@ fn cell(s: &State, i: usize, t: &Track, open: bool, width: f32) -> El {
     } else {
         el().key("live")
     });
-    r = r.child(text(format!("{:>2}.", i + 1)).key("num").font(mono(12.0, 500.0)).color(fg).w(36.0))
-        .child(if sounding { el().key("spk").pr(6.0).child(speaker(14.0, fg)) } else { el().key("spk") })
+    // Where the song was left: a thin line on the bottom edge.
+    let left_at = s.playable(i).and_then(|p| s.media.position(&p)).unwrap_or(0.0);
+    let len = if t.duration > 0 { t.duration as f64 } else { 0.0 };
+    let frac = if len > 0.0 { (left_at / len).clamp(0.0, 1.0) as f32 } else { 0.0 };
+    let line_color = if bg == ink() { paper() } else if bg == yellow() || bg == red() || bg == stripe(i) && matches!(i % 7, 0 | 2) { ink() } else { red() };
+    r = r.child(el().key("left-at").absolute(0.0, 22.0).h(2.0).w_frac(frac).fill(if frac > 0.0 { line_color } else { Color::TRANSPARENT }));
+    r = r.child(if sounding {
+            el().key("num").w(36.0).child(speaker(14.0, fg))
+        } else {
+            text(format!("{:>2}.", i + 1)).key("num").font(mono(12.0, 500.0)).color(fg).w(36.0)
+        })
         .child(label.key("title"))
         .child(chip_el.key("chip"));
     if t.state == TState::Have {
@@ -989,7 +1023,8 @@ fn player(s: &State, path: &str, spotify: f64, _width: f32) -> El {
     let pos = match &s.scrub {
         Some((p, f)) if p == path => *f as f64 * len,
         _ if mine => st.pos,
-        _ => 0.0,
+        // Where it was left (also by a hover play).
+        _ => s.media.position(path).unwrap_or(0.0),
     };
     let frac = if len > 0.0 { (pos / len).clamp(0.0, 1.0) as f32 } else { 0.0 };
     // The part that can play, 0 to 1.
@@ -1315,6 +1350,14 @@ fn settings_panel(s: &State) -> El {
             .child(row().size(22.0, 22.0).center().border(2.0, ink()).fill(if fb { ink() } else { Color::TRANSPARENT })
                 .child(text(if fb { "✓" } else { "" }).font(mono(13.0, 600.0)).color(paper())))
             .child(text(l.t("TRY YOUTUBE MUSIC", "PROBAR CON YOUTUBE MUSIC")).font(mono(14.0, 600.0)).color(ink())))
+        .child(label(l.t("LISTENING", "ESCUCHAR")))
+        .child(row().key("hover-play").gap(10.0).center_y().cursor(Cursor::Pointer).on_press(|s: &mut State| {
+                let on = !s.settings.hover_play;
+                s.set_hover_play(on);
+            })
+            .child(row().size(22.0, 22.0).center().border(2.0, ink()).fill(if s.settings.hover_play { ink() } else { Color::TRANSPARENT })
+                .child(text(if s.settings.hover_play { "✓" } else { "" }).font(mono(13.0, 600.0)).color(paper())))
+            .child(text(l.t("PLAY A SONG WHEN THE MOUSE PASSES OVER IT", "SONAR UNA CANCIÓN CUANDO PASÁS EL MOUSE")).font(mono(14.0, 600.0)).color(ink())))
         .child(el().h(6.0))
         .child(row().w_full().justify_between().center_y()
             .child(text(l.t("ENTER SAVES · ESC CLOSES", "ENTER GUARDA · ESC CIERRA")).font(mono(11.0, 500.0)).color(muted()))

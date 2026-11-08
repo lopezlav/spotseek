@@ -251,6 +251,10 @@ impl Media {
 
     /// The download of `old` became the file `new`: a preview that plays goes on with it.
     pub fn swap(&self, old: &str, new: &str) {
+        // The place it was left goes with it.
+        if let Some(p) = self.position(old) {
+            self.positions.lock().unwrap().insert(new.to_string(), p);
+        }
         if !old.is_empty() && self.status().path == old {
             self.send(Cmd::Swap(old.to_string(), new.to_string()));
         }

@@ -59,6 +59,7 @@ fn on_key(s: &mut State, ev: &KeyEvent, _: &mut Tx) -> bool {
         Key::Escape if s.login_open => s.login_open = false,
         Key::Enter if s.settings_open => s.close_settings(),
         Key::Enter if s.login_open => s.sign_in(),
+        Key::Escape if s.hover_started.is_some() => s.stop_hover(),
         Key::Escape if s.open.is_some() => s.open = None,
         Key::Text(t) if t == " " && s.open.is_some() && !(s.phase == Phase::Idle && s.link.focused) => {
             if let Some(d) = s.open.clone().and_then(|k| s.detail_of(&k)) {
