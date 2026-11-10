@@ -42,58 +42,90 @@ pub fn detect(input: &str) -> Result<(String, String)> {
     Err(anyhow!("cannot read a Spotify id from {input:?}"))
 }
 
+/// Spotify sometimes sends `null` for a field (for example the width of a playlist image).
+/// Read `null`, or a value of an unexpected type, as the default value instead of failing.
+fn or_default<'de, D, T>(d: D) -> std::result::Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned + Default,
+{
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).unwrap_or_default())
+}
+
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct ArtistRef {
+    #[serde(deserialize_with = "or_default")]
     name: String,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct TrackItem {
+    #[serde(deserialize_with = "or_default")]
     uri: String,
+    #[serde(deserialize_with = "or_default")]
     title: String,
+    #[serde(deserialize_with = "or_default")]
     name: String,
+    #[serde(deserialize_with = "or_default")]
     subtitle: String,
+    #[serde(deserialize_with = "or_default")]
     duration: u64,
+    #[serde(deserialize_with = "or_default")]
     artists: Vec<ArtistRef>,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct Image {
+    #[serde(deserialize_with = "or_default")]
     url: String,
     #[serde(rename = "maxWidth")]
+    #[serde(deserialize_with = "or_default")]
     max_width: i64,
+    #[serde(deserialize_with = "or_default")]
     width: i64,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct Visual {
+    #[serde(deserialize_with = "or_default")]
     image: Vec<Image>,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct CoverArt {
+    #[serde(deserialize_with = "or_default")]
     sources: Vec<Image>,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct Entity {
+    #[serde(deserialize_with = "or_default")]
     name: String,
+    #[serde(deserialize_with = "or_default")]
     title: String,
+    #[serde(deserialize_with = "or_default")]
     uri: String,
+    #[serde(deserialize_with = "or_default")]
     subtitle: String,
+    #[serde(deserialize_with = "or_default")]
     duration: u64,
     #[serde(rename = "trackList")]
+    #[serde(deserialize_with = "or_default")]
     track_list: Vec<TrackItem>,
+    #[serde(deserialize_with = "or_default")]
     artists: Vec<ArtistRef>,
     #[serde(rename = "visualIdentity")]
+    #[serde(deserialize_with = "or_default")]
     visual: Visual,
     #[serde(rename = "coverArt")]
+    #[serde(deserialize_with = "or_default")]
     cover_art: CoverArt,
 }
 
@@ -336,5 +368,16 @@ mod tests {
         assert_eq!(e.cover(), "b");
         let t = track_from_item(&e.track_list[0]);
         assert_eq!((t.id.as_str(), t.artist.as_str(), t.title.as_str(), t.duration), ("abc", "A", "One", 200));
+    }
+
+    #[test]
+    fn reads_null_fields() {
+        // Spotify sends "width": null for some playlist images; that made every such link fail.
+        let v = serde_json::json!({"name":"Mix","subtitle":null,"duration":null,"coverArt":{"sources":[{"height":null,"width":null,"url":"a"}]},
+            "trackList":[{"uri":"spotify:track:abc","title":"One","subtitle":"A","duration":null,"artists":null}]});
+        let e: Entity = serde_json::from_value(v).unwrap();
+        assert_eq!(e.cover(), "a");
+        let t = track_from_item(&e.track_list[0]);
+        assert_eq!((t.id.as_str(), t.artist.as_str(), t.duration), ("abc", "A", 0));
     }
 }

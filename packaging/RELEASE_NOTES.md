@@ -1,3 +1,8 @@
+## New in 0.2.4
+
+- **Fixed: "spotify: bad entity".** Some playlists did not open at all: Spotify sends no size for
+  their cover image, and Spotseek stopped there. These links work again.
+
 ## New in 0.2.3
 
 - **A new engine, in Rust.** Spotseek now has its own Soulseek client: no more Sockseek, Go or
