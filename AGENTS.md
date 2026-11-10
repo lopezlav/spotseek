@@ -1,11 +1,24 @@
 # Notes for agents
 
+## Branches
+
+- **`dev`** is the work branch. Push to it freely, or merge short branches into it.
+  CI runs on every push to `dev`.
+- **`main`** is what users have: only released code. It changes only by a pull request from
+  `dev` (or an urgent fix, see below), and each merge to `main` is followed by a release.
+- Merge `dev` into `main` with a **merge commit**, never squash or rebase. A squash makes the two
+  branches different, and every later merge then has conflicts.
+- After the release, bring `dev` up to `main`:
+  `git checkout dev && git pull && git merge --ff-only origin/main && git push`.
+- Urgent fix for users: branch from `main`, pull request to `main`, release, then merge `main`
+  into `dev`.
+
 ## Versions and releases
 
 - Every update ships as a **patch** release (0.2.0 → 0.2.1 → 0.2.2), unless the change is very large.
 - When several patches have collected, the next release can be a **minor** one (0.3.0).
 - **Juan decides minor and major bumps.** Ask him before you make one; do patches without asking.
-- Release: merge to `main`, then `gh workflow run release.yml --ref main -f version=X.Y.Z -f draft_release=true`.
+- Release: merge `dev` into `main` (see Branches), then `gh workflow run release.yml --ref main -f version=X.Y.Z -f draft_release=true`.
   When every job passes, publish the draft (`gh release edit vX.Y.Z --draft=false --latest`).
 - Update `packaging/RELEASE_NOTES.md` (it is the release text) and the version in `ui/Cargo.toml`
   and `engine/Cargo.toml` (the app compares it with the newest release to offer the update).
