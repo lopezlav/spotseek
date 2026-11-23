@@ -19,7 +19,8 @@
 #   - LGPL only: there is no --enable-gpl and no --enable-nonfree.
 #   - --disable-everything, then only the parts that the engine and yt-dlp
 #     use (see the lists below): decode the usual audio formats, keep the
-#     cover art (stream copy), encode MP3 with LAME, and the yt-dlp fixups
+#     cover art (stream copy), encode MP3 with LAME, AAC (m4a) and FLAC with
+#     the encoders of FFmpeg itself, and the yt-dlp fixups
 #     (`-c copy -f mp4`, the aac_adtstoasc filter).
 #   - --disable-autodetect: it links only to system libraries (libSystem on
 #     macOS, the Windows DLLs that every Windows has, nothing on Linux).
@@ -57,7 +58,9 @@ LAME_URL="http://deb.debian.org/debian/pool/main/l/lame/lame_${LAME_VERSION}.ori
 LAME_SHA256=ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e
 
 ZLIB_VERSION=1.3.1
-ZLIB_URL="https://zlib.net/fossils/zlib-${ZLIB_VERSION}.tar.gz"
+# zlib's own GitHub release first: zlib.net sometimes answers with a web page instead of the file.
+ZLIB_URL="https://github.com/madler/zlib/releases/download/v${ZLIB_VERSION}/zlib-${ZLIB_VERSION}.tar.gz"
+ZLIB_MIRROR="https://zlib.net/fossils/zlib-${ZLIB_VERSION}.tar.gz"
 ZLIB_SHA256=9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23
 
 # ---- What the app uses ------------------------------------------------------
@@ -69,8 +72,8 @@ DECODERS=(
   mjpeg png bmp
 )
 DEMUXERS=(mp3 flac wav aiff ape wv mov ogg matroska asf aac mpegts)
-MUXERS=(mp3 mp4 ipod mov null)
-ENCODERS=(libmp3lame)
+MUXERS=(mp3 mp4 ipod mov flac null)
+ENCODERS=(libmp3lame aac flac)
 PARSERS=(mpegaudio flac aac opus vorbis mjpeg png bmp)
 BSFS=(aac_adtstoasc null)
 FILTERS=(abuffer abuffersink aformat anull aresample)
@@ -158,25 +161,36 @@ sha256_of() {
   else shasum -a 256 "$1" | cut -d' ' -f1; fi
 }
 
-# fetch <url> <sha256> <file name>: download once into $WORK/dl, check the hash.
+# fetch <sha256> <file name> <url> [more urls]: download once into $WORK/dl and check the hash.
+# A url that fails, or gives a file with another hash, is followed by the next one.
 fetch() {
-  local url=$1 want=$2 file="$WORK/dl/$3" got
-  if [ ! -f "$file" ] || [ "$(sha256_of "$file")" != "$want" ]; then
+  local want=$1 file="$WORK/dl/$2" got url
+  shift 2
+  if [ -f "$file" ] && [ "$(sha256_of "$file")" = "$want" ]; then
+    return
+  fi
+  for url in "$@"; do
     echo "==> download $url"
-    curl -fL --retry 3 --retry-delay 5 -o "$file.part" "$url"
-    mv "$file.part" "$file"
-  fi
-  got=$(sha256_of "$file")
-  if [ "$got" != "$want" ]; then
-    echo "error: sha256 of $file is $got, expected $want" >&2
-    rm -f "$file"
-    exit 1
-  fi
+    rm -f "$file.part"
+    if ! curl -fL --retry 3 --retry-delay 5 -o "$file.part" "$url"; then
+      echo "warning: download failed: $url" >&2
+      continue
+    fi
+    got=$(sha256_of "$file.part")
+    if [ "$got" = "$want" ]; then
+      mv "$file.part" "$file"
+      return
+    fi
+    echo "warning: sha256 of $url is $got, expected $want" >&2
+  done
+  rm -f "$file.part"
+  echo "error: no good download of $2" >&2
+  exit 1
 }
 
-fetch "$FFMPEG_URL" "$FFMPEG_SHA256" "ffmpeg-$FFMPEG_VERSION.tar.xz"
-fetch "$LAME_URL" "$LAME_SHA256" "lame-$LAME_VERSION.tar.gz"
-fetch "$ZLIB_URL" "$ZLIB_SHA256" "zlib-$ZLIB_VERSION.tar.gz"
+fetch "$FFMPEG_SHA256" "ffmpeg-$FFMPEG_VERSION.tar.xz" "$FFMPEG_URL"
+fetch "$LAME_SHA256" "lame-$LAME_VERSION.tar.gz" "$LAME_URL"
+fetch "$ZLIB_SHA256" "zlib-$ZLIB_VERSION.tar.gz" "$ZLIB_URL" "$ZLIB_MIRROR"
 
 tar -xJf "$WORK/dl/ffmpeg-$FFMPEG_VERSION.tar.xz" -C "$SRC"
 tar -xzf "$WORK/dl/lame-$LAME_VERSION.tar.gz" -C "$SRC"
@@ -259,7 +273,7 @@ echo "==> ffmpeg $FFMPEG_VERSION"
       exit 1
     }
   # Stop if configure did not turn on a part that we asked for.
-  for want in libmp3lame_encoder aac_adtstoasc_bsf png_decoder mov_muxer aresample_filter; do
+  for want in libmp3lame_encoder aac_encoder flac_encoder flac_muxer ipod_muxer aac_adtstoasc_bsf png_decoder mov_muxer aresample_filter; do
     grep -q "^#define CONFIG_$(echo "$want" | tr a-z A-Z) 1" config_components.h || {
       echo "error: configure did not enable $want" >&2
       exit 1
@@ -284,7 +298,7 @@ cp "$SRC/lame-$LAME_VERSION/COPYING" "$LIC/lame-COPYING.txt"
 cp "$SRC/zlib-$ZLIB_VERSION/LICENSE" "$LIC/zlib-LICENSE.txt"
 cat >"$LIC/ffmpeg-SOURCES.txt" <<EOF
 ffmpeg in Spotseek is built from these sources by scripts/build-ffmpeg.sh
-(https://github.com/lopezlav/spotseek/blob/main/scripts/build-ffmpeg.sh), LGPL only:
+(https://github.com/keeeeeb/spotseek/blob/main/scripts/build-ffmpeg.sh), LGPL only:
   FFmpeg $FFMPEG_VERSION  $FFMPEG_URL  sha256 $FFMPEG_SHA256
   LAME $LAME_VERSION      $LAME_URL  sha256 $LAME_SHA256
   zlib $ZLIB_VERSION      $ZLIB_URL  sha256 $ZLIB_SHA256

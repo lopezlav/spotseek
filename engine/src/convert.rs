@@ -1,6 +1,8 @@
-//! Turns a downloaded file into the mp3 in the output folder. The sound never goes up: an mp3
-//! at or below the wanted bitrate is copied as it is; a better mp3 or a lossless file is encoded
-//! down to the wanted bitrate; another lossy format is encoded at no more than its own bitrate.
+//! Turns a downloaded file into the file in the output folder, in the format the user chose (mp3,
+//! m4a or flac). The sound never goes up: a file already in that format at or below the wanted
+//! bitrate is copied as it is; a better one or a lossless file is encoded down to the wanted
+//! bitrate; another lossy format is encoded at no more than its own bitrate. FLAC is lossless:
+//! a FLAC is copied, anything else is encoded to FLAC (a lossy source keeps its own sound).
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -12,12 +14,69 @@ use tokio::process::Command;
 /// mp3 bitrates, kbps.
 const STEPS: [u32; 8] = [96, 112, 128, 160, 192, 224, 256, 320];
 
+/// The format of the files in the output folder.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Format {
+    #[default]
+    Mp3,
+    /// AAC in an .m4a file.
+    M4a,
+    Flac,
+}
+
+impl Format {
+    pub const ALL: [Format; 3] = [Format::Mp3, Format::M4a, Format::Flac];
+
+    pub fn parse(s: &str) -> Option<Format> {
+        Format::ALL.into_iter().find(|f| f.ext().eq_ignore_ascii_case(s.trim()))
+    }
+
+    /// The file extension, also the name on the command line.
+    pub fn ext(self) -> &'static str {
+        match self {
+            Format::Mp3 => "mp3",
+            Format::M4a => "m4a",
+            Format::Flac => "flac",
+        }
+    }
+
+    /// The codec name in `ffmpeg -i` output.
+    fn codec(self) -> &'static str {
+        match self {
+            Format::Mp3 => "mp3",
+            Format::M4a => "aac",
+            Format::Flac => "flac",
+        }
+    }
+
+    pub fn lossless(self) -> bool {
+        self == Format::Flac
+    }
+
+    /// A Soulseek file with this extension is already in the format (copied, not encoded).
+    pub fn same_ext(self, ext: &str) -> bool {
+        match self {
+            Format::M4a => ext == "m4a" || ext == "aac",
+            f => ext == f.ext(),
+        }
+    }
+
+    /// The ffmpeg muxer.
+    fn muxer(self) -> &'static str {
+        match self {
+            Format::Mp3 => "mp3",
+            Format::M4a => "ipod",
+            Format::Flac => "flac",
+        }
+    }
+}
+
 /// What the converter does with a file.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Plan {
-    /// Copy the mp3 as it is.
+    /// Keep the audio as it is (an mp3 is copied; m4a and flac are put in a new file with the tags).
     Copy,
-    /// Encode to mp3 at this many kbps.
+    /// Encode at this many kbps (0 for FLAC: lossless, no bitrate).
     Encode(u32),
 }
 
@@ -35,11 +94,14 @@ pub fn step_up(kbps: u32) -> u32 {
     STEPS.iter().copied().find(|s| *s + 4 >= kbps).unwrap_or(320)
 }
 
-pub fn plan(p: &Probe, target: u32) -> Plan {
+pub fn plan(p: &Probe, format: Format, target: u32) -> Plan {
+    if format.lossless() {
+        return if p.codec == format.codec() { Plan::Copy } else { Plan::Encode(0) };
+    }
     if p.lossless {
         return Plan::Encode(target);
     }
-    if p.codec == "mp3" {
+    if p.codec == format.codec() {
         // A few kbps over (VBR, rounding) is still the same quality.
         return if p.kbps == 0 || p.kbps <= target + 8 { Plan::Copy } else { Plan::Encode(target) };
     }
@@ -62,6 +124,27 @@ pub async fn probe(ffmpeg: &str, path: &Path) -> Result<Probe> {
     // It exits with an error (no output file was given); the facts are on stderr all the same.
     let text = String::from_utf8_lossy(&out.stderr);
     parse_probe(&text).ok_or_else(|| anyhow!("no audio stream: {}", text.lines().last().unwrap_or("").trim()))
+}
+
+/// The length of the audio in seconds, from `ffmpeg -i`.
+pub async fn duration(ffmpeg: &str, path: &Path) -> Option<u32> {
+    let out = tokio::time::timeout(
+        Duration::from_secs(30),
+        command(ffmpeg).args(["-hide_banner", "-nostdin", "-i"]).arg(path).stdout(Stdio::null()).stderr(Stdio::piped()).output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    parse_duration(&String::from_utf8_lossy(&out.stderr))
+}
+
+/// `  Duration: 00:03:21.03, start: …` → 201.
+pub fn parse_duration(text: &str) -> Option<u32> {
+    let l = text.lines().find(|l| l.trim_start().starts_with("Duration:"))?;
+    let v = l.trim_start()["Duration:".len()..].trim_start().split(',').next()?.trim();
+    let mut it = v.split(':');
+    let (h, m, s): (u32, u32, f64) = (it.next()?.parse().ok()?, it.next()?.parse().ok()?, it.next()?.parse().ok()?);
+    Some(h * 3600 + m * 60 + s.round() as u32)
 }
 
 /// "123 kb/s" (or "123 kb/s (default)") → 123.
@@ -105,12 +188,12 @@ pub fn safe_name(s: &str) -> String {
     cleaned.split_whitespace().collect::<Vec<_>>().join(" ").trim_end_matches('.').to_string()
 }
 
-/// `dir/base.mp3`, or `dir/base (1).mp3`, … when it is taken. Creates an empty file there, so
-/// two conversions at once never pick the same name.
-pub fn unique_dest(dir: &Path, base: &str) -> PathBuf {
+/// `dir/base.mp3`, or `dir/base (1).mp3`, … when it is taken (with the extension `ext`). Creates
+/// an empty file there, so two conversions at once never pick the same name.
+pub fn unique_dest(dir: &Path, base: &str, ext: &str) -> PathBuf {
     let mut i = 0;
     loop {
-        let name = if i == 0 { format!("{base}.mp3") } else { format!("{base} ({i}).mp3") };
+        let name = if i == 0 { format!("{base}.{ext}") } else { format!("{base} ({i}).{ext}") };
         let p = dir.join(name);
         if std::fs::OpenOptions::new().write(true).create_new(true).open(&p).is_ok() {
             return p;
@@ -119,7 +202,7 @@ pub fn unique_dest(dir: &Path, base: &str) -> PathBuf {
     }
 }
 
-/// Tags written into the mp3.
+/// Tags written into the file.
 #[derive(Clone, Debug, Default)]
 pub struct Tags {
     pub artist: String,
@@ -131,29 +214,29 @@ pub struct Tools {
     pub ffmpeg: String,
 }
 
-/// Converts `src` into a new mp3 in `dir` named `base`, at most `target` kbps. Returns the mp3
-/// and the bitrate it has.
-pub async fn to_mp3(tools: &Tools, src: &Path, dir: &Path, base: &str, target: u32, tags: &Tags) -> Result<(PathBuf, u32)> {
+/// Converts `src` into a new file in `format` in `dir` named `base`, at most `target` kbps.
+/// Returns the file and the bitrate it has (for FLAC: the bitrate of the source's sound).
+pub async fn convert(tools: &Tools, src: &Path, dir: &Path, base: &str, format: Format, target: u32, tags: &Tags) -> Result<(PathBuf, u32)> {
     tokio::fs::create_dir_all(dir).await?;
     let p = probe(&tools.ffmpeg, src).await?;
-    let dest = unique_dest(dir, base);
+    let dest = unique_dest(dir, base, format.ext());
     let result = async {
-        match plan(&p, target) {
-            Plan::Copy => {
-                tokio::fs::copy(src, &dest).await?;
-                let d = dest.clone();
-                let t = tags.clone();
-                let _ = tokio::task::spawn_blocking(move || fill_tags(&d, &t)).await;
-                Ok(p.kbps)
-            }
-            Plan::Encode(kbps) => {
-                // Keep the cover picture; a picture ffmpeg cannot put in an mp3 is left out.
-                if encode(tools, src, &dest, kbps, tags, true).await.is_err() {
-                    encode(tools, src, &dest, kbps, tags, false).await?;
-                }
-                Ok(kbps)
-            }
+        let pl = plan(&p, format, target);
+        if pl == Plan::Copy && format == Format::Mp3 {
+            tokio::fs::copy(src, &dest).await?;
+            let d = dest.clone();
+            let t = tags.clone();
+            let _ = tokio::task::spawn_blocking(move || fill_tags(&d, &t)).await;
+            return Ok(p.kbps);
         }
+        // Keep the cover picture; a picture ffmpeg cannot put in the file is left out.
+        if encode(tools, src, &dest, format, pl, !p.lossless, tags, true).await.is_err() {
+            encode(tools, src, &dest, format, pl, !p.lossless, tags, false).await?;
+        }
+        Ok(match pl {
+            Plan::Encode(k) if k > 0 => k,
+            _ => p.kbps,
+        })
     }
     .await;
     match result {
@@ -165,7 +248,8 @@ pub async fn to_mp3(tools: &Tools, src: &Path, dir: &Path, base: &str, target: u
     }
 }
 
-async fn encode(tools: &Tools, src: &Path, dest: &Path, kbps: u32, tags: &Tags, cover: bool) -> Result<()> {
+#[allow(clippy::too_many_arguments)]
+async fn encode(tools: &Tools, src: &Path, dest: &Path, format: Format, plan: Plan, lossy_src: bool, tags: &Tags, cover: bool) -> Result<()> {
     let mut c = command(&tools.ffmpeg);
     c.args(["-y", "-loglevel", "error", "-i"]).arg(src);
     if cover {
@@ -173,14 +257,32 @@ async fn encode(tools: &Tools, src: &Path, dest: &Path, kbps: u32, tags: &Tags, 
     } else {
         c.arg("-vn");
     }
-    c.args(["-map_metadata", "0", "-id3v2_version", "3", "-c:a", "libmp3lame", "-b:a", &format!("{kbps}k")]);
+    c.args(["-map_metadata", "0"]);
+    match (plan, format) {
+        (Plan::Copy, _) => {
+            c.args(["-c:a", "copy"]);
+        }
+        (Plan::Encode(kbps), Format::Mp3) => {
+            c.args(["-id3v2_version", "3", "-c:a", "libmp3lame", "-b:a", &format!("{kbps}k")]);
+        }
+        (Plan::Encode(kbps), Format::M4a) => {
+            c.args(["-c:a", "aac", "-b:a", &format!("{kbps}k")]);
+        }
+        (Plan::Encode(_), Format::Flac) => {
+            c.args(["-c:a", "flac"]);
+            // A lossy source has no bit depth: 16 bits, like a CD (else it would be 24 or 32).
+            if lossy_src {
+                c.args(["-sample_fmt", "s16"]);
+            }
+        }
+    }
     // Spotify's names, so the file is found again by its tags.
     for (k, v) in [("artist", &tags.artist), ("title", &tags.title), ("album", &tags.album)] {
         if !v.is_empty() {
             c.arg("-metadata").arg(format!("{k}={v}"));
         }
     }
-    c.args(["-f", "mp3"]).arg(dest);
+    c.args(["-f", format.muxer()]).arg(dest);
     let out = tokio::time::timeout(Duration::from_secs(600), c.stdout(Stdio::null()).stderr(Stdio::piped()).output()).await??;
     if !out.status.success() {
         return Err(anyhow!("ffmpeg: {}", String::from_utf8_lossy(&out.stderr).trim()));
@@ -220,17 +322,33 @@ mod tests {
     }
 
     #[test]
+    fn formats() {
+        use Format::*;
+        assert_eq!(Format::parse("FLAC"), Some(Flac));
+        assert_eq!(Format::parse("m4a"), Some(M4a));
+        assert_eq!(Format::parse("ogg"), None);
+        assert_eq!(plan(&p("aac", 256), M4a, 320), Plan::Copy, "an aac is not encoded again");
+        assert_eq!(plan(&p("aac", 320), M4a, 192), Plan::Encode(192));
+        assert_eq!(plan(&p("mp3", 320), M4a, 256), Plan::Encode(256));
+        assert_eq!(plan(&p("flac", 900), M4a, 256), Plan::Encode(256));
+        assert_eq!(plan(&p("flac", 900), Flac, 320), Plan::Copy);
+        assert_eq!(plan(&p("alac", 900), Flac, 320), Plan::Encode(0));
+        assert_eq!(plan(&p("mp3", 320), Flac, 320), Plan::Encode(0));
+        assert!(M4a.same_ext("aac") && !Mp3.same_ext("m4a"));
+    }
+
+    #[test]
     fn never_converts_up() {
-        assert_eq!(plan(&p("mp3", 320), 320), Plan::Copy);
-        assert_eq!(plan(&p("mp3", 192), 320), Plan::Copy, "a 192 mp3 is not made 320");
-        assert_eq!(plan(&p("mp3", 245), 320), Plan::Copy);
-        assert_eq!(plan(&p("mp3", 320), 192), Plan::Encode(192), "a better mp3 goes down");
-        assert_eq!(plan(&p("flac", 900), 320), Plan::Encode(320));
-        assert_eq!(plan(&p("pcm_s16le", 1411), 256), Plan::Encode(256));
-        assert_eq!(plan(&p("opus", 135), 320), Plan::Encode(160), "YouTube opus: no more than it has");
-        assert_eq!(plan(&p("aac", 256), 320), Plan::Encode(256));
-        assert_eq!(plan(&p("aac", 256), 192), Plan::Encode(192));
-        assert_eq!(plan(&p("vorbis", 0), 320), Plan::Encode(192));
+        assert_eq!(plan(&p("mp3", 320), Format::Mp3, 320), Plan::Copy);
+        assert_eq!(plan(&p("mp3", 192), Format::Mp3, 320), Plan::Copy, "a 192 mp3 is not made 320");
+        assert_eq!(plan(&p("mp3", 245), Format::Mp3, 320), Plan::Copy);
+        assert_eq!(plan(&p("mp3", 320), Format::Mp3, 192), Plan::Encode(192), "a better mp3 goes down");
+        assert_eq!(plan(&p("flac", 900), Format::Mp3, 320), Plan::Encode(320));
+        assert_eq!(plan(&p("pcm_s16le", 1411), Format::Mp3, 256), Plan::Encode(256));
+        assert_eq!(plan(&p("opus", 135), Format::Mp3, 320), Plan::Encode(160), "YouTube opus: no more than it has");
+        assert_eq!(plan(&p("aac", 256), Format::Mp3, 320), Plan::Encode(256));
+        assert_eq!(plan(&p("aac", 256), Format::Mp3, 192), Plan::Encode(192));
+        assert_eq!(plan(&p("vorbis", 0), Format::Mp3, 320), Plan::Encode(192));
     }
 
     #[test]
@@ -246,6 +364,9 @@ mod tests {
         let flac = "  Duration: 00:00:03.00, start: 0.000000, bitrate: 118 kb/s\n  Stream #0:0: Audio: flac, 44100 Hz, mono, s16";
         assert!(parse_probe(flac).unwrap().lossless);
         assert_eq!(parse_probe("x.jpg: Invalid data found when processing input"), None);
+        assert_eq!(parse_duration(mp3), Some(201));
+        assert_eq!(parse_duration("  Duration: 01:00:29.60, start: 0"), Some(3630));
+        assert_eq!(parse_duration("  Duration: N/A, bitrate: N/A"), None);
     }
 
     #[test]
@@ -253,8 +374,8 @@ mod tests {
         assert_eq!(safe_name("AC/DC: Back in Black?"), "AC DC Back in Black");
         let dir = std::env::temp_dir().join(format!("spotseek-names-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let a = unique_dest(&dir, "x");
-        let b = unique_dest(&dir, "x");
+        let a = unique_dest(&dir, "x", "mp3");
+        let b = unique_dest(&dir, "x", "mp3");
         assert_eq!(a.file_name().unwrap(), "x.mp3");
         assert_eq!(b.file_name().unwrap(), "x (1).mp3");
         let _ = std::fs::remove_dir_all(dir);
@@ -282,18 +403,37 @@ mod tests {
         let mp3 = mk("b.mp3", &["-c:a", "libmp3lame", "-b:a", "128k"]);
         let out = dir.join("out");
         let tags = Tags { artist: "Art".into(), title: "Song".into(), album: "Alb".into() };
-        let (f, k) = to_mp3(&tools, &flac, &out, "Art - Song", 320, &tags).await.unwrap();
+        let (f, k) = convert(&tools, &flac, &out, "Art - Song", Format::Mp3, 320, &tags).await.unwrap();
         assert_eq!(k, 320);
         let got = probe(&ff, &f).await.unwrap();
         assert_eq!((got.codec.as_str(), got.lossless), ("mp3", false));
         assert!((300..=330).contains(&got.kbps), "{got:?}");
         let got = probe(&ff, &flac).await.unwrap();
         assert_eq!((got.codec.as_str(), got.lossless), ("flac", true));
-        let (m, k) = to_mp3(&tools, &mp3, &out, "Art - Song", 320, &tags).await.unwrap();
+        let (m, k) = convert(&tools, &mp3, &out, "Art - Song", Format::Mp3, 320, &tags).await.unwrap();
         assert!(k <= 130, "copied, not raised: {k}");
         assert_eq!(m.file_name().unwrap(), "Art - Song (1).mp3");
         use id3::TagLike;
         assert_eq!(id3::Tag::read_from_path(&m).unwrap().title(), Some("Song"));
+        let title = |text: &str| text.lines().any(|l| l.trim_start().starts_with("title") && l.trim_end().ends_with(": Song"));
+        let info = |path: &Path| String::from_utf8_lossy(&std::process::Command::new(&ff).arg("-hide_banner").arg("-i").arg(path).output().unwrap().stderr).into_owned();
+        // m4a: AAC, no higher than the mp3 had.
+        let (a, k) = convert(&tools, &mp3, &out, "Art - Song", Format::M4a, 320, &tags).await.unwrap();
+        assert_eq!(a.file_name().unwrap(), "Art - Song.m4a");
+        assert!(k <= 128, "{k}");
+        let got = probe(&ff, &a).await.unwrap();
+        assert_eq!(got.codec, "aac");
+        assert!(title(&info(&a)), "{}", info(&a));
+        let (a2, _) = convert(&tools, &a, &out, "Art - Song", Format::M4a, 320, &tags).await.unwrap();
+        assert_eq!(probe(&ff, &a2).await.unwrap().codec, "aac", "an m4a is copied");
+        // flac: the flac is kept lossless; an mp3 becomes a 16-bit flac.
+        let (l, _) = convert(&tools, &flac, &out, "Art - Song", Format::Flac, 320, &tags).await.unwrap();
+        assert_eq!(l.file_name().unwrap(), "Art - Song.flac");
+        assert!(probe(&ff, &l).await.unwrap().lossless);
+        assert!(title(&info(&l)), "{}", info(&l));
+        let (l2, _) = convert(&tools, &mp3, &out, "Art - Song", Format::Flac, 320, &tags).await.unwrap();
+        assert_eq!(probe(&ff, &l2).await.unwrap().codec, "flac");
+        assert!(info(&l2).contains(", s16"), "{}", info(&l2));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

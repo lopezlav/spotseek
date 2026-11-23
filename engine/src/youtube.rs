@@ -1,5 +1,5 @@
 //! The fallback: find the track on YouTube Music with yt-dlp and download its best audio. The
-//! converter makes the mp3 (never above the bitrate YouTube has).
+//! converter makes the file (never above the bitrate YouTube has).
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -121,7 +121,7 @@ pub struct YtDlp {
 }
 
 impl YtDlp {
-    async fn run(&self, timeout: Duration, args: &[&str]) -> Result<String> {
+    pub async fn run(&self, timeout: Duration, args: &[&str]) -> Result<String> {
         let mut c = command(&self.bin);
         c.args(["--no-warnings", "--ignore-config"]).args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
         let out = tokio::time::timeout(timeout, c.output()).await.map_err(|_| anyhow!("yt-dlp took too long"))??;

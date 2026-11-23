@@ -78,7 +78,7 @@ func main() {
 		return
 	}
 
-	a := app.NewWithID("io.github.lopezlav.spotseek")
+	a := app.NewWithID("io.github.keeeeeb.spotseek")
 	a.Settings().SetTheme(theme.DarkTheme())
 	w := a.NewWindow("Spotseek")
 	mainWindow = w

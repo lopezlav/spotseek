@@ -19,6 +19,9 @@ fn is_false(v: &bool) -> bool {
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct Event {
     pub ev: String,
+    /// `--serve`: the link (job) the event is about; 0 for the engine as a whole.
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub job: u64,
     /// phase: spotify, soulseek, youtube, convert, done
     #[serde(skip_serializing_if = "String::is_empty")]
     pub phase: String,
@@ -180,5 +183,14 @@ impl Emitter {
     }
     pub fn emit(&self, e: Event) {
         (self.0)(&e)
+    }
+    /// The same output, with every event marked as job `job`.
+    pub fn with_job(&self, job: u64) -> Emitter {
+        let inner = self.clone();
+        Emitter::new(move |e| {
+            let mut e = e.clone();
+            e.job = job;
+            inner.emit(e)
+        })
     }
 }

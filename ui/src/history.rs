@@ -20,7 +20,7 @@ pub struct SavedTrack {
     pub duration: u32,
     /// "done" or "missing".
     pub state: String,
-    /// "soulseek" or "youtube".
+    /// "soulseek", "youtube" or "soundcloud".
     pub source: String,
     pub peer: String,
     /// The YouTube page of a fallback download.
@@ -146,18 +146,19 @@ impl Library {
         let Ok(rd) = std::fs::read_dir(dir) else { return lib };
         for e in rd.flatten() {
             let p = e.path();
-            if !p.extension().is_some_and(|x| x.eq_ignore_ascii_case("mp3")) {
+            let ext = p.extension().map(|x| x.to_string_lossy().to_lowercase()).unwrap_or_default();
+            if !matches!(ext.as_str(), "mp3" | "m4a" | "flac") {
                 continue;
             }
             let ps = p.to_string_lossy().into_owned();
-            if let Ok(tag) = id3::Tag::read_from_path(&p) {
+            if let Some(tag) = (ext == "mp3").then(|| id3::Tag::read_from_path(&p).ok()).flatten() {
                 use id3::TagLike;
                 if let (Some(a), Some(t)) = (tag.artist(), tag.title()) {
                     lib.by_key.entry(key(a, t)).or_insert_with(|| ps.clone());
                     continue;
                 }
             }
-            // No tags: "Artist - Title.mp3".
+            // No tags (or not an mp3): "Artist - Title.mp3".
             let stem = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
             if let Some((a, t)) = stem.split_once(" - ") {
                 lib.by_key.entry(key(a, t)).or_insert_with(|| ps.clone());

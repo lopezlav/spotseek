@@ -1,9 +1,10 @@
 //! Which Soulseek file to download for a track: is it the same song (name and length), is the
-//! sound good enough for the mp3 we want (never less than needed when there is better), and will
+//! sound good enough for the file we want (never less than needed when there is better), and will
 //! the peer send it soon and fast.
 
 use unicode_normalization::UnicodeNormalization;
 
+use crate::convert::Format;
 use crate::events::CandInfo;
 use crate::slsk::{SearchResponse, SharedFile};
 use crate::spotify::Track;
@@ -173,18 +174,22 @@ pub fn kbps(f: &SharedFile) -> u32 {
     }
 }
 
-/// How good the sound is for an mp3 of `target` kbps, 0 to 1. Lossless and mp3 at or above the
-/// target are 1; lower mp3 counts by its bitrate; other lossy formats count a little less.
-pub fn quality(f: &SharedFile, target: u32) -> f32 {
+/// How good the sound is for a `format` file of `target` kbps, 0 to 1. Lossless, and the same
+/// format at or above the target, are 1; lower counts by its bitrate; other lossy formats count a
+/// little less. For FLAC only lossless is 1: a lossy file counts at most 0.6.
+pub fn quality(f: &SharedFile, format: Format, target: u32) -> f32 {
     if is_lossless(&f.ext) {
         return 1.0;
     }
     let b = kbps(f);
+    if format.lossless() {
+        return if b == 0 { 0.3 } else { 0.6 * (b as f32 / 320.0).min(1.0) };
+    }
     if b == 0 {
         return 0.5;
     }
     let q = (b as f32 / target as f32).min(1.0);
-    if f.ext == "mp3" { q } else { q * 0.85 }
+    if format.same_ext(&f.ext) { q } else { q * 0.85 }
 }
 
 /// One file for a track, with its scores.
@@ -239,11 +244,12 @@ impl Cand {
 }
 
 /// The rank score: the fit first, then the sound, then how soon and how fast it comes.
-pub fn score(fit: u32, f: &SharedFile, free: bool, speed: u32, queue: u32, target: u32) -> f32 {
+#[allow(clippy::too_many_arguments)]
+pub fn score(fit: u32, f: &SharedFile, free: bool, speed: u32, queue: u32, format: Format, target: u32) -> f32 {
     let mut s = fit as f32;
-    s += 40.0 * quality(f, target);
-    // An mp3 at the target bitrate is copied as it is: no conversion.
-    if f.ext == "mp3" && kbps(f) == target {
+    s += 40.0 * quality(f, format, target);
+    // A file already in the format (at the target bitrate) is copied as it is: no conversion.
+    if format.same_ext(&f.ext) && (format.lossless() || kbps(f) == target) {
         s += 5.0;
     }
     if free {
@@ -264,6 +270,7 @@ pub fn score(fit: u32, f: &SharedFile, free: bool, speed: u32, queue: u32, targe
 /// gives each new file an id; `known` keeps the ids of files seen before.
 pub struct Ranker {
     pub track: Track,
+    pub format: Format,
     pub target: u32,
     pub cands: Vec<Cand>,
     next_id: u32,
@@ -276,8 +283,8 @@ pub struct Ranker {
 }
 
 impl Ranker {
-    pub fn new(track: Track, target: u32) -> Ranker {
-        Ranker { track, target, cands: Vec::new(), next_id: 0, sent: Vec::new(), sent_at: None, sent_settled: false, known: Default::default() }
+    pub fn new(track: Track, format: Format, target: u32) -> Ranker {
+        Ranker { track, format, target, cands: Vec::new(), next_id: 0, sent: Vec::new(), sent_at: None, sent_settled: false, known: Default::default() }
     }
 
     /// Adds a peer's answer. True when a new file fits.
@@ -295,7 +302,7 @@ impl Ranker {
                 continue;
             }
             let known = self.known.contains(&r.user);
-            let score = score(fit, f, r.free_slot, r.avg_speed, r.queue_len, self.target) + if known { 8.0 } else { 0.0 };
+            let score = score(fit, f, r.free_slot, r.avg_speed, r.queue_len, self.format, self.target) + if known { 8.0 } else { 0.0 };
             self.cands.push(Cand { id: self.next_id, user: r.user.clone(), file: f.clone(), free: r.free_slot, speed: r.avg_speed, queue: r.queue_len, fit, score, failed: false, known });
             self.next_id += 1;
             added = true;
@@ -328,12 +335,12 @@ impl Ranker {
 
     /// Found without a search is enough when one file surely is the song and its sound is good.
     pub fn enough_without_search(&self) -> bool {
-        self.cands.iter().any(|c| !c.failed && c.fit >= 85 && quality(&c.file, self.target) >= 0.75)
+        self.cands.iter().any(|c| !c.failed && c.fit >= 85 && quality(&c.file, self.format, self.target) >= 0.75)
     }
 
     /// Very good candidates: surely the song, a free peer, the full sound, and a short download.
     pub fn excellent(&self) -> usize {
-        self.cands.iter().filter(|c| !c.failed && c.free && c.fit >= 90 && quality(&c.file, self.target) >= 0.99 && c.eta() <= 60).count()
+        self.cands.iter().filter(|c| !c.failed && c.free && c.fit >= 90 && quality(&c.file, self.format, self.target) >= 0.99 && c.eta() <= 60).count()
     }
 
     /// The list for the app window when it changed, at most every half second (always when
@@ -407,11 +414,18 @@ mod tests {
         let mp3_320 = file("a.mp3", 8_000_000, Some(320), Some(200));
         let mp3_128 = file("a.mp3", 3_200_000, Some(128), Some(200));
         let m4a = file("a.m4a", 6_000_000, Some(256), Some(200));
-        assert_eq!(quality(&flac, 320), 1.0);
-        assert_eq!(quality(&mp3_320, 320), 1.0);
-        assert!(quality(&mp3_128, 320) < 0.5);
-        assert!(quality(&m4a, 320) < quality(&mp3_320, 320));
-        assert_eq!(quality(&mp3_128, 128), 1.0);
+        let mp3 = Format::Mp3;
+        assert_eq!(quality(&flac, mp3, 320), 1.0);
+        assert_eq!(quality(&mp3_320, mp3, 320), 1.0);
+        assert!(quality(&mp3_128, mp3, 320) < 0.5);
+        assert!(quality(&m4a, mp3, 320) < quality(&mp3_320, mp3, 320));
+        assert_eq!(quality(&mp3_128, mp3, 128), 1.0);
+        // m4a: an m4a at the target is as good as it gets, an mp3 a little less.
+        assert_eq!(quality(&m4a, Format::M4a, 256), 1.0);
+        assert!(quality(&mp3_320, Format::M4a, 256) < 1.0);
+        // flac: only lossless is full sound.
+        assert_eq!(quality(&flac, Format::Flac, 320), 1.0);
+        assert!(quality(&mp3_320, Format::Flac, 320) < 0.75, "a lossy file is not enough to stop looking");
         // No bitrate: from size and length.
         assert_eq!(kbps(&file("a.mp3", 8_000_000, None, Some(200))), 320);
     }
@@ -419,7 +433,7 @@ mod tests {
     #[test]
     fn a_fast_free_peer_beats_a_queued_one_and_failures_go_last() {
         let t = track("Daft Punk", "One More Time", 320);
-        let mut r = Ranker::new(t, 320);
+        let mut r = Ranker::new(t, Format::Mp3, 320);
         let f = file(r"music\Daft Punk\01 - One More Time.mp3", 12_800_000, Some(320), Some(320));
         r.add(&SearchResponse { user: "queued".into(), free_slot: false, avg_speed: 2_000_000, queue_len: 30, files: vec![f.clone()] });
         r.add(&SearchResponse { user: "free".into(), free_slot: true, avg_speed: 900_000, queue_len: 0, files: vec![f.clone()] });

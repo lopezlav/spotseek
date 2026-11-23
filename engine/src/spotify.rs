@@ -17,6 +17,8 @@ pub struct Track {
     pub title: String,
     pub album: String,
     pub duration: u32,
+    /// The track's own page when it has audio there (SoundCloud), else empty.
+    pub url: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -162,13 +164,13 @@ fn item_id(uri: &str) -> Option<String> {
 fn track_from_item(it: &TrackItem) -> Track {
     let artist = it.artists.first().map(|a| first_artist(&a.name)).unwrap_or_else(|| first_artist(&it.subtitle));
     let title = if it.title.is_empty() { it.name.clone() } else { it.title.clone() };
-    Track { id: item_id(&it.uri).unwrap_or_default(), artist, title, album: String::new(), duration: (it.duration / 1000) as u32 }
+    Track { id: item_id(&it.uri).unwrap_or_default(), artist, title, album: String::new(), duration: (it.duration / 1000) as u32, url: String::new() }
 }
 
 fn track_from_entity(e: &Entity) -> Track {
     let artist = e.artists.first().map(|a| first_artist(&a.name)).unwrap_or_else(|| first_artist(&e.subtitle));
     let title = if e.name.is_empty() { e.title.clone() } else { e.name.clone() };
-    Track { id: item_id(&e.uri).unwrap_or_default(), artist, title, album: String::new(), duration: (e.duration / 1000) as u32 }
+    Track { id: item_id(&e.uri).unwrap_or_default(), artist, title, album: String::new(), duration: (e.duration / 1000) as u32, url: String::new() }
 }
 
 pub fn b62_to_hex(s: &str) -> Result<String> {

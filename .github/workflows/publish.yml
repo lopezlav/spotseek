@@ -28,11 +28,11 @@ jobs:
       - name: Skip without a token
         if: env.TAP_TOKEN == ''
         run: echo "::notice::HOMEBREW_TAP_TOKEN is not set; the Homebrew tap was not updated."
-      - name: Update lopezlav/homebrew-tap
+      - name: Update keeeeeb/homebrew-tap
         if: env.TAP_TOKEN != ''
         run: |
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS.txt --dir "$RUNNER_TEMP"
-          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/lopezlav/homebrew-tap.git" "$RUNNER_TEMP/tap"
+          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/keeeeeb/homebrew-tap.git" "$RUNNER_TEMP/tap"
           mkdir -p "$RUNNER_TEMP/tap/Casks"
           python3 scripts/render-cask.py "${TAG#v}" "$RUNNER_TEMP/SHA256SUMS.txt" > "$RUNNER_TEMP/tap/Casks/spotseek.rb"
           cd "$RUNNER_TEMP/tap"
@@ -56,7 +56,7 @@ jobs:
       - uses: vedantmgoyal9/winget-releaser@b7370d4d152efdce803a26cc6ca9eee58cb2ad54 # v2
         if: env.WINGET_TOKEN != ''
         with:
-          identifier: Lopezlav.Spotseek
+          identifier: Keeeeeb.Spotseek
           installers-regex: 'Spotseek-Setup-windows-x64\.exe$'
           release-tag: ${{ inputs.tag || github.event.release.tag_name }}
           token: ${{ env.WINGET_TOKEN }}

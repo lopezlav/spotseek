@@ -1,10 +1,13 @@
 # Spotseek
 
-A small desktop app that downloads music as mp3 files. Paste a public Spotify
-**playlist**, **album**, or **track** link. Tracks download from Soulseek first
-(also FLAC and WAV, which are made into mp3), the gaps are filled from YouTube
-Music, and every file becomes an mp3 at the bitrate you choose. The sound never
-goes up: a 192 kbps mp3 stays 192, it is not made a bigger file that sounds the same.
+A small desktop app that downloads music as mp3, m4a (AAC) or FLAC files. Paste a
+public Spotify **playlist**, **album**, or **track** link, or a SoundCloud **track**,
+**set**, or a profile's **tracks** or **likes** page. Tracks download from Soulseek
+first (also FLAC and WAV); a SoundCloud track Soulseek does not have comes from its
+own SoundCloud page; the gaps are filled from YouTube Music; and
+every file becomes the format you choose in the settings, at the bitrate you
+choose (FLAC has none: it is lossless). The sound never goes up: a 192 kbps mp3
+stays 192, it is not made a bigger file that sounds the same.
 
 The app opens one simple window: paste a link, watch it search and download,
 then get a poster of the tracks. Click a song to see the files Soulseek found for
@@ -23,29 +26,21 @@ need is a **Soulseek account** for the Soulseek route.
 macOS (Apple Silicon or Intel) and Linux:
 
 ```bash
-curl -fsSL https://github.com/lopezlav/spotseek/releases/latest/download/install.sh | sh
-```
-
-macOS with Homebrew:
-
-```bash
-brew install lopezlav/tap/spotseek
+curl -fsSL https://github.com/keeeeeb/spotseek/releases/latest/download/install.sh | sh
 ```
 
 Windows (PowerShell):
 
 ```powershell
-irm https://github.com/lopezlav/spotseek/releases/latest/download/install.ps1 | iex
+irm https://github.com/keeeeeb/spotseek/releases/latest/download/install.ps1 | iex
 ```
-
-or `winget install Lopezlav.Spotseek`.
 
 The scripts download the file for your computer, check it against the release's
 `SHA256SUMS.txt`, and install it: on macOS in `/Applications`, on Linux in
 `~/.local/share/spotseek` (with an app menu entry and a `spotseek` command), on Windows
 for your user.
 
-### From a file ([releases page](https://github.com/lopezlav/spotseek/releases/latest))
+### From a file ([releases page](https://github.com/keeeeeb/spotseek/releases/latest))
 
 | System | File |
 |---|---|
@@ -57,8 +52,8 @@ for your user.
 - **macOS:** open the disk image and drag Spotseek to Applications. macOS 12 (Monterey)
   or later. The app is not notarized by Apple, so the first start from a browser download
   is blocked: use **System Settings → Privacy & Security → Open Anyway**, or run
-  `xattr -dr com.apple.quarantine /Applications/Spotseek.app` once. (The install command and
-  Homebrew do not have this problem.)
+  `xattr -dr com.apple.quarantine /Applications/Spotseek.app` once. (The install command does
+  not have this problem.)
 - **Windows:** run the installer. Windows may show a blue SmartScreen warning because the
   app is not signed: choose **More info**, then **Run anyway**.
 - **Linux, AppImage:** `chmod +x Spotseek-linux-x64.AppImage`, then run it.
@@ -73,7 +68,6 @@ Soulseek password. Built on Ubuntu 22.04.
 
 When a new version is out, a banner on the paste screen says so. **UPDATE** downloads it,
 checks it, puts it in place of the old one and starts Spotseek again; **×** hides that version.
-(Homebrew users can also run `brew upgrade`.)
 
 ## Soulseek account
 
@@ -91,7 +85,7 @@ the app yourself, these tools must be on the machine, because the self-built
 app has no bundled copies:
 
 - **yt-dlp** - for the YouTube Music fallback.
-- **ffmpeg** - for the mp3 conversion (and to read what a file is).
+- **ffmpeg** - for the conversion to mp3, m4a or FLAC (and to read what a file is).
 - **Deno** - JavaScript runtime needed by yt-dlp for full YouTube support.
 
 On macOS:
@@ -100,17 +94,97 @@ On macOS:
 brew install yt-dlp ffmpeg deno
 ```
 
+## Run from source
+
+To run your own copy of the code (for example a change that is not released yet):
+
+**1. Install the tools.** [Rust](https://rustup.rs) (stable), Git, and the tools from
+[Requirements](#requirements):
+
+```bash
+# macOS
+brew install yt-dlp ffmpeg deno
+# Ubuntu / Debian (also the libraries the window needs)
+sudo apt-get install -y ffmpeg pkg-config libasound2-dev libdbus-1-dev \
+  libwayland-dev libxkbcommon-dev libgl1-mesa-dev xorg-dev
+pipx install yt-dlp        # or: python3 -m pip install --user yt-dlp
+curl -fsSL https://deno.land/install.sh | sh
+```
+
+On Windows: install Rust with the MSVC toolchain, then the tools:
+
+```powershell
+winget install yt-dlp.yt-dlp
+winget install Gyan.FFmpeg
+winget install DenoLand.Deno
+```
+
+**2. Get the code.**
+
+```bash
+git clone https://github.com/keeeeeb/spotseek
+cd spotseek
+# To run a branch that is not merged yet: git checkout <branch-name>
+```
+
+**3. Build the engine, then start the window.** The window runs the engine as its
+backend; `SPOTSEEK_BACKEND` tells it where your freshly built one is.
+`SPOTSEEK_NO_UPDATE_CHECK=1` keeps the window from offering to replace your build
+with the latest official release.
+
+macOS and Linux:
+
+```bash
+(cd engine && cargo build --release)
+cd ui
+SPOTSEEK_BACKEND="$(pwd)/../engine/target/release/spotseek-backend" \
+SPOTSEEK_NO_UPDATE_CHECK=1 cargo run --release
+```
+
+Windows (PowerShell):
+
+```powershell
+cd engine; cargo build --release; cd ..
+cd ui
+$env:SPOTSEEK_BACKEND = "$PWD\..\engine\target\release\spotseek-backend.exe"
+$env:SPOTSEEK_NO_UPDATE_CHECK = "1"
+cargo run --release
+```
+
+The first build downloads the Rust libraries and takes a few minutes; later runs
+start in seconds. Paste a Spotify or SoundCloud link, and choose the folder, the
+format (MP3, M4A or FLAC) and the bitrate in SETTINGS.
+
+**Without the window**, the engine alone downloads a link from the command line:
+
+```bash
+engine/target/release/spotseek-backend --cli "<spotify-or-soundcloud-url>" \
+  -o ~/Music/Spotseek --format mp3 --bitrate 320
+```
+
+`--help` lists every option (`--format m4a|flac`, `--limit N`, `--skip-soulseek`,
+`--no-fallback`, …). The Soulseek account comes from `--user NAME --pass-stdin`, or
+from `~/.config/sockseek/sockseek.conf` (see [Soulseek account](#soulseek-account)).
+
+To check a change before you run it: `cd engine && cargo test --release`, and
+`cd ui && cargo test --release`.
+
 ## The app window (Rune UI) and the engine
 
 The window is `ui/`, written in Rust with [Rune](https://github.com/anomalyco/rune).
 It does no downloading itself: it runs the engine, `engine/` (Rust, the program
-`spotseek-backend`), as a child process:
-`spotseek-backend --cli <url> -o <dir> --events --ask [--manual]`. The engine writes one
-JSON event per line (see `engine/src/events.rs`) and stops when its stdin closes. Stdin
-lines it reads: `{"only":[0,2,5]}` after the track list (with `--ask`), `{"stop":true}`
-(stop downloading, keep and convert what is done), and `{"pick":{"i":3,"id":7}}` or
-`{"pick":{"i":3,"yt":true}}` (download that file for track 3, or take it from YouTube
-Music). The window looks for `spotseek-backend` next to its own program; set
+`spotseek-backend`), as one child process for every tab:
+`spotseek-backend --serve --events [--user NAME --pass-stdin]`. A Soulseek account can be
+online in one place only, so all tabs share that one engine, its Soulseek session, its
+download slots (12) and the search limit; each tab's link is a job that runs at the same time
+as the others. Stdin lines name the job: `{"job":3,"add":{"url":…,"out":…,"format":"mp3",
+"bitrate":320,"fallback":true,"ask":true,"manual":false,"cover_out":…}}` starts it,
+`{"job":3,"only":[0,2,5]}` answers the track list, `{"job":3,"stop":true}` stops downloading
+(keep and convert what is done), `{"job":3,"cancel":true}` ends it at once, and
+`{"job":3,"pick":{"i":3,"id":7}}` or `{"job":3,"pick":{"i":3,"yt":true}}` downloads that file
+for track 3, or takes it from YouTube Music. The engine writes one JSON event per line (see
+`engine/src/events.rs`), each with its `job` (0: the Soulseek session as a whole), and stops
+when its stdin closes. `--cli <url> -o <dir>` runs one link on its own. The window looks for `spotseek-backend` next to its own program; set
 `SPOTSEEK_BACKEND` to use another path.
 
 How the engine works (`engine/src`):
@@ -135,10 +209,16 @@ How the engine works (`engine/src`):
   best file, and when it does not start in 15 seconds, stalls, or is much too slow while
   there are other files, take the next one. After six files, or when Soulseek has none,
   YouTube Music. Each track is converted the moment it lands.
-- `convert.rs` - the sound never goes up: an mp3 at or below the bitrate you chose is
-  copied as it is; a better mp3, FLAC, WAV or AIFF is encoded down to it; other lossy
-  formats (YouTube's opus, AAC) are encoded at no more than their own bitrate.
+- `convert.rs` - makes the format you chose (mp3, m4a or flac). The sound never goes up: a
+  file in that format at or below the bitrate you chose is copied as it is; a better one, or
+  FLAC, WAV or AIFF, is encoded down to it; other lossy formats (YouTube's opus, an mp3 for
+  m4a) are encoded at no more than their own bitrate. For FLAC a FLAC is copied and anything
+  else is encoded to FLAC; the ranking then prefers lossless files.
 - `spotify.rs`, `youtube.rs` - the public Spotify pages, and yt-dlp.
+- `soundcloud.rs` - SoundCloud links, read with yt-dlp: the artist and the title come from
+  "Artist - Title" uploads (else the uploader is the artist), without "[FREE DOWNLOAD]" and the
+  like. When Soulseek has no file, the track's own SoundCloud audio is downloaded; a
+  SoundCloud Go+ track gives only a 30-second preview, so that one goes to YouTube Music.
 
 In the window:
 
@@ -178,7 +258,7 @@ Development helpers:
 ```bash
 cd engine && cargo test --release && cd ..
 # One run from the command line (text output; add --events for the JSON events):
-engine/target/release/spotseek-backend --cli "<spotify-url>" -o /tmp/out --limit 2
+engine/target/release/spotseek-backend --cli "<spotify-or-soundcloud-url>" -o /tmp/out --limit 2
 cd ui
 cargo test --release
 # Render one screen headless (see --list-scenes: downloading, details, manual, preview, …)

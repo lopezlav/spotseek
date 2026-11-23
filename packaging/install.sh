@@ -1,7 +1,7 @@
 #!/bin/sh
 # Installs (or updates) Spotseek on macOS or Linux:
 #
-#   curl -fsSL https://github.com/lopezlav/spotseek/releases/latest/download/install.sh | sh
+#   curl -fsSL https://github.com/keeeeeb/spotseek/releases/latest/download/install.sh | sh
 #
 # macOS: Spotseek.app goes to /Applications (or ~/Applications when /Applications cannot be
 # written). Linux: the files go to ~/.local/share/spotseek, with a "spotseek" command and an app
@@ -10,7 +10,7 @@
 # SPOTSEEK_BASE_URL replaces the download address (for tests; a file:// URL works too).
 set -eu
 
-base=${SPOTSEEK_BASE_URL:-https://github.com/lopezlav/spotseek/releases/latest/download}
+base=${SPOTSEEK_BASE_URL:-https://github.com/keeeeeb/spotseek/releases/latest/download}
 
 say() { printf '%s\n' "$*"; }
 fail() { say "Spotseek: $*" >&2; exit 1; }

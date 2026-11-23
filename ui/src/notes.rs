@@ -170,6 +170,27 @@ pub fn word(l: Lang, code: &str, title: &str, peer: &str, message: &str, count: 
                 format!("{t}: downloaded from YouTube Music.")
             }
         }
+        "sc_done" => {
+            if es {
+                format!("{t}: no estaba en Soulseek; descargada de SoundCloud.")
+            } else {
+                format!("{t}: not on Soulseek; downloaded from SoundCloud.")
+            }
+        }
+        "sc_preview" => {
+            if es {
+                format!("{t}: SoundCloud da solo una muestra de {clock} (es de SoundCloud Go+).")
+            } else {
+                format!("{t}: SoundCloud gives only a {clock} preview (a SoundCloud Go+ track).")
+            }
+        }
+        "sc_failed" => {
+            if es {
+                format!("{t}: falló la descarga de SoundCloud.")
+            } else {
+                format!("{t}: the SoundCloud download failed.")
+            }
+        }
         "yt_no_match" => {
             if es {
                 format!("{t}: YouTube Music no tiene una versión que coincida.")
@@ -246,7 +267,7 @@ mod tests {
     fn every_code_has_words_in_both_languages() {
         for code in [
             "signed_in", "no_account", "login_failed", "offline", "reconnecting", "reconnected", "search_limit", "found", "no_files", "queued", "peer_failed", "gave_up",
-            "downloaded", "yt_done", "yt_no_match", "yt_blocked", "yt_failed", "missing", "convert_failed", "stopping", "found_free", "browsed", "memory",
+            "downloaded", "yt_done", "sc_done", "sc_preview", "sc_failed", "yt_no_match", "yt_blocked", "yt_failed", "missing", "convert_failed", "stopping", "found_free", "browsed", "memory",
         ] {
             for l in [Lang::En, Lang::Es] {
                 assert!(!word(l, code, "A – B", "peer", "", 3, 40).is_empty(), "{code} {l:?}");

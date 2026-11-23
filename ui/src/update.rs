@@ -57,7 +57,7 @@ impl Up {
     }
 }
 
-pub const REPO: &str = "lopezlav/spotseek";
+pub const REPO: &str = "keeeeeb/spotseek";
 
 fn backend() -> Command {
     let mut c = Command::new(crate::backend::binary());

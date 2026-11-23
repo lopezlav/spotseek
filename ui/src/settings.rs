@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 #[serde(default)]
 pub struct Settings {
     pub dir: String,
+    /// The files made: "mp3", "m4a" or "flac".
+    pub format: String,
+    /// kbps of mp3 and m4a files (FLAC has none).
     pub bitrate: String,
     pub fallback: bool,
     /// The Soulseek user name (the password is in the system's secure store).
@@ -31,6 +34,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             dir: home().join("Downloads").join("Spotseek").to_string_lossy().into_owned(),
+            format: "mp3".into(),
             bitrate: "320".into(),
             fallback: true,
             user: String::new(),
@@ -74,6 +78,12 @@ impl Settings {
         if let Ok(b) = serde_json::to_vec_pretty(self) {
             write_atomic(&p, &b);
         }
+    }
+
+    /// "MP3 320", "M4A 256" or "FLAC".
+    pub fn quality_label(&self) -> String {
+        let f = self.format.to_uppercase();
+        if self.format == "flac" { f } else { format!("{f} {}", self.bitrate) }
     }
 
     /// The folder with the home folder shown as `~`.

@@ -23,14 +23,14 @@ pub const BAR: u32 = 2;
 pub const WORDS_PER_LANG: usize = 7;
 /// The English words, then the same words in Spanish.
 pub const WORDS: [&[&str]; 14] = [
-    &["PASTE A", "SPOTIFY LINK."],
+    &["PASTE A", "LINK."],
     &["SEARCHING"],
     &["DOWNLOADING"],
     &["CONVERTING"],
     &["DONE."],
     &["FAILED."],
     &["ALREADY", "DOWNLOADED."],
-    &["PEGÁ UN LINK", "DE SPOTIFY."],
+    &["PEGÁ", "UN LINK."],
     &["BUSCANDO"],
     &["DESCARGANDO"],
     &["CONVIRTIENDO"],

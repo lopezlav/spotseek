@@ -44,7 +44,7 @@ cat > "$OUT/Contents/Info.plist" <<PLIST
 <dict>
   <key>CFBundleExecutable</key><string>spotseek</string>
   <key>CFBundleIconFile</key><string>icon.icns</string>
-  <key>CFBundleIdentifier</key><string>io.github.lopezlav.spotseek</string>
+  <key>CFBundleIdentifier</key><string>io.github.keeeeeb.spotseek</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>Spotseek</string>
   <key>CFBundleDisplayName</key><string>Spotseek</string>

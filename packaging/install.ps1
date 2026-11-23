@@ -1,12 +1,12 @@
 # Installs (or updates) Spotseek on Windows, for this user:
 #
-#   irm https://github.com/lopezlav/spotseek/releases/latest/download/install.ps1 | iex
+#   irm https://github.com/keeeeeb/spotseek/releases/latest/download/install.ps1 | iex
 #
 # It downloads the installer, checks it against SHA256SUMS.txt and runs it without questions.
 # $env:SPOTSEEK_BASE_URL replaces the download address (for tests).
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$base = if ($env:SPOTSEEK_BASE_URL) { $env:SPOTSEEK_BASE_URL } else { 'https://github.com/lopezlav/spotseek/releases/latest/download' }
+$base = if ($env:SPOTSEEK_BASE_URL) { $env:SPOTSEEK_BASE_URL } else { 'https://github.com/keeeeeb/spotseek/releases/latest/download' }
 $asset = 'Spotseek-Setup-windows-x64.exe'
 if (-not [Environment]::Is64BitOperatingSystem) { throw 'Spotseek needs 64-bit Windows.' }
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ("spotseek-" + [Guid]::NewGuid())

@@ -1,9 +1,15 @@
 //! spotseek-backend: the download engine of the Spotseek app window.
 //!
-//! `spotseek-backend --cli <spotify-url> -o <dir> --events` writes one JSON event per line (see
+//! `spotseek-backend --cli <spotify-or-soundcloud-url> -o <dir> --events` writes one JSON event per line (see
 //! `events.rs`) and stops when its stdin closes. Stdin lines it reads: the Soulseek password
 //! first (with `--pass-stdin`), then `{"only":[0,2]}` (with `--ask`), `{"stop":true}`, and
 //! `{"pick":{"i":3,"id":7}}` or `{"pick":{"i":3,"yt":true}}`.
+//!
+//! `spotseek-backend --serve --events [--user NAME --pass-stdin]` runs many links at the same
+//! time on one Soulseek session (the app window's tabs). Stdin lines name a job:
+//! `{"job":1,"add":{"url":…,"out":…,"format":"mp3","bitrate":320,"fallback":true,"ask":true,
+//! "manual":false,"cover_out":…}}` starts one, `{"job":1,"cancel":true}` ends it at once, and the
+//! controls above take a `"job"` too. Each event carries its `"job"` (0: the whole engine).
 //!
 //! `spotseek-backend --cli --check-login --user NAME` (password on stdin) signs in once and
 //! prints `{"ok":true}` or `{"ok":false,"reason":"INVALIDPASS","message":"…"}`.
@@ -15,6 +21,7 @@ mod events;
 mod pipeline;
 mod rank;
 mod slsk;
+mod soundcloud;
 mod spotify;
 mod store;
 mod update;
@@ -26,9 +33,10 @@ use std::path::PathBuf;
 use events::{Emitter, Event};
 use pipeline::{Control, Options};
 
-const HELP: &str = "spotseek-backend --cli <spotify-url> -o <dir> [options]
+const HELP: &str = "spotseek-backend --cli <spotify-or-soundcloud-url> -o <dir> [options]
 
-  --bitrate N        mp3 kbps: 320, 256, 192 or 128 (default 320)
+  --format F         the files made: mp3, m4a (AAC) or flac (default mp3)
+  --bitrate N        mp3 and m4a kbps: 320, 256, 192 or 128 (default 320)
   --events           JSON events on stdout, one per line; stop when stdin closes
   --ask              with --events: read {\"only\":[indexes]} (or {}) after the collection event
   --manual           with --events: wait for {\"pick\":{\"i\":N,\"id\":K}} for each track
@@ -40,6 +48,8 @@ const HELP: &str = "spotseek-backend --cli <spotify-url> -o <dir> [options]
   --limit N          only the first N tracks
   --parallel N       downloads at the same time (default 12; YouTube at most 2)
   --state-dir DIR    keep the peer memory and the search cache here (default: the app's folder)
+  --serve            with --events: no link; read {\"job\":N,\"add\":{...}} lines and run
+                     every link at the same time on one Soulseek session
 
 spotseek-backend --cli --check-login --user NAME   (password on stdin)
 spotseek-backend --latest | --update               (the newest release; install it)
@@ -49,6 +59,7 @@ spotseek-backend --latest | --update               (the newest release; install 
 struct Args {
     url: String,
     out: String,
+    format: convert::Format,
     bitrate: u32,
     events: bool,
     ask: bool,
@@ -61,6 +72,7 @@ struct Args {
     limit: usize,
     parallel: usize,
     check_login: bool,
+    serve: bool,
     help: bool,
     state_dir: String,
 }
@@ -77,6 +89,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         match flag.trim_start_matches('-') {
             "cli" if flag.starts_with('-') => {}
             "o" | "out" => a.out = value("-o")?,
+            "format" => a.format = convert::Format::parse(&value("--format")?).ok_or("--format must be mp3, m4a or flac")?,
             "bitrate" => a.bitrate = value("--bitrate")?.parse().map_err(|_| "bad --bitrate")?,
             "events" => a.events = true,
             "ask" => a.ask = true,
@@ -92,6 +105,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             "state-dir" => a.state_dir = value("--state-dir")?,
             "h" | "help" => a.help = true,
             // Old flags of the Go backend that mean nothing here.
+            "serve" => a.serve = true,
             "timings" | "extract-only" => {}
             _ if flag.starts_with('-') => return Err(format!("unknown flag {flag}")),
             _ => a.url = arg.clone(),
@@ -264,6 +278,9 @@ fn main() {
         println!("{v}");
         return;
     }
+    if args.serve {
+        std::process::exit(rt.block_on(serve(args)));
+    }
     if args.url.is_empty() || args.out.is_empty() {
         eprintln!("usage: spotseek-backend --cli <spotify-url> -o <dir>");
         std::process::exit(2);
@@ -296,13 +313,7 @@ async fn run(args: Args) -> i32 {
         }
     });
     let pass = if pass_stdin { pass_rx.recv().unwrap_or_default() } else { String::new() };
-    let account = if args.skip_soulseek {
-        None
-    } else if !args.user.is_empty() && !pass.is_empty() {
-        Some((args.user.clone(), pass))
-    } else {
-        conf_account().filter(|(u, _)| args.user.is_empty() || *u == args.user)
-    };
+    let account = account_of(&args, pass);
     let emit = if args.events {
         Emitter::stdout()
     } else {
@@ -316,6 +327,7 @@ async fn run(args: Args) -> i32 {
     let o = Options {
         input: args.url,
         out_dir: PathBuf::from(args.out),
+        format: args.format,
         bitrate: args.bitrate,
         fallback: !args.no_fallback,
         account,
@@ -342,6 +354,117 @@ async fn run(args: Args) -> i32 {
     }
 }
 
+/// The account to sign in with: `--user` and the password from stdin, else Sockseek's file.
+fn account_of(args: &Args, pass: String) -> Option<(String, String)> {
+    if args.skip_soulseek {
+        None
+    } else if !args.user.is_empty() && !pass.is_empty() {
+        Some((args.user.clone(), pass))
+    } else {
+        conf_account().filter(|(u, _)| args.user.is_empty() || *u == args.user)
+    }
+}
+
+/// The options of one `--serve` job: the `add` message over the command line's.
+fn job_options(args: &Args, account: Option<(String, String)>, add: &serde_json::Value) -> Result<Options, String> {
+    let s = |k: &str| add.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let b = |k: &str, d: bool| add.get(k).and_then(|v| v.as_bool()).unwrap_or(d);
+    let url = s("url");
+    let out = s("out");
+    if url.is_empty() || out.is_empty() {
+        return Err("add needs a url and an out folder".into());
+    }
+    let format = match add.get("format").and_then(|v| v.as_str()) {
+        Some(f) => convert::Format::parse(f).ok_or("format must be mp3, m4a or flac")?,
+        None => args.format,
+    };
+    let bitrate = match add.get("bitrate") {
+        Some(v) => v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())).ok_or("bad bitrate")? as u32,
+        None => args.bitrate,
+    };
+    if !matches!(bitrate, 128 | 192 | 256 | 320) {
+        return Err("bitrate must be 320, 256, 192 or 128".into());
+    }
+    let cover = s("cover_out");
+    Ok(Options {
+        input: url,
+        out_dir: PathBuf::from(out),
+        format,
+        bitrate,
+        fallback: b("fallback", !args.no_fallback),
+        account,
+        server: std::env::var("SPOTSEEK_SLSK_SERVER").unwrap_or_else(|_| slsk::SERVER.to_string()),
+        manual: b("manual", args.manual),
+        ask: b("ask", args.ask),
+        cover_out: (!cover.is_empty()).then(|| PathBuf::from(cover)),
+        limit: add.get("limit").and_then(|v| v.as_u64()).unwrap_or(args.limit as u64) as usize,
+        ffmpeg: "ffmpeg".into(),
+        ytdlp: "yt-dlp".into(),
+        parallel: args.parallel.clamp(1, 16),
+        state_dir: if args.state_dir.is_empty() { default_state_dir() } else { Some(PathBuf::from(&args.state_dir)) },
+    })
+}
+
+/// `--serve`: one Soulseek session for every link the app window adds, all at the same time.
+async fn serve(args: Args) -> i32 {
+    let (line_tx, mut line_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (pass_tx, pass_rx) = std::sync::mpsc::channel::<String>();
+    let pass_stdin = args.pass_stdin;
+    std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        let mut lines = stdin.lock().lines();
+        if pass_stdin {
+            let p = lines.next().and_then(Result::ok).unwrap_or_default();
+            let _ = pass_tx.send(p.trim_end_matches('\r').to_string());
+        }
+        drop(pass_tx);
+        for line in lines.map_while(Result::ok) {
+            let _ = line_tx.send(line);
+        }
+        // The app window is gone: stop at once.
+        std::process::exit(1);
+    });
+    let pass = if pass_stdin { pass_rx.recv().unwrap_or_default() } else { String::new() };
+    let account = account_of(&args, pass);
+    let emit = Emitter::stdout();
+    let state_dir = if args.state_dir.is_empty() { default_state_dir() } else { Some(PathBuf::from(&args.state_dir)) };
+    let server = std::env::var("SPOTSEEK_SLSK_SERVER").unwrap_or_else(|_| slsk::SERVER.to_string());
+    let sh = pipeline::Shared::new(account.clone(), server, args.parallel.clamp(1, 16), state_dir, emit.clone());
+    let mut jobs: std::collections::HashMap<u64, (tokio::sync::mpsc::UnboundedSender<pipeline::Control>, tokio::task::AbortHandle)> = Default::default();
+    while let Some(line) = line_rx.recv().await {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else { continue };
+        let Some(job) = v.get("job").and_then(|j| j.as_u64()).filter(|j| *j > 0) else { continue };
+        let jemit = emit.with_job(job);
+        if let Some(add) = v.get("add") {
+            let o = match job_options(&args, account.clone(), add) {
+                Ok(o) => o,
+                Err(e) => {
+                    jemit.emit(Event { message: e, ..Event::new("error") });
+                    continue;
+                }
+            };
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let sh = sh.clone();
+            let task = tokio::spawn(async move {
+                if let Err(e) = pipeline::run_shared(o, jemit.clone(), rx, sh).await {
+                    jemit.emit(Event { message: e.to_string(), ..Event::new("error") });
+                }
+            });
+            jobs.insert(job, (tx, task.abort_handle()));
+        } else if v.get("cancel").is_some() {
+            if let Some((_, h)) = jobs.remove(&job) {
+                h.abort();
+            }
+        } else if let Some(c) = parse_control(&line) {
+            if let Some((tx, _)) = jobs.get(&job) {
+                let _ = tx.send(c);
+            }
+        }
+        jobs.retain(|_, (_, h)| !h.is_finished());
+    }
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,6 +481,17 @@ mod tests {
         assert!(a.events && a.pass_stdin && a.ask && a.manual && !a.no_fallback);
         assert!(parse_args(&s(&["--cli", "--check-login", "--user", "x"])).unwrap().check_login);
         assert!(parse_args(&s(&["--bitrate", "999"])).is_err());
+        assert_eq!(parse_args(&s(&["--format", "flac"])).unwrap().format, convert::Format::Flac);
+        assert_eq!(parse_args(&s(&[])).unwrap().format, convert::Format::Mp3);
+        assert!(parse_args(&s(&["--format", "ogg"])).is_err());
+        assert!(parse_args(&s(&["--serve", "--events"])).unwrap().serve);
+        let a = parse_args(&s(&["--serve", "--events", "--format", "m4a"])).unwrap();
+        let add = serde_json::json!({"url": "https://soundcloud.com/a/b", "out": "/o", "format": "flac", "bitrate": "256", "manual": true});
+        let o = job_options(&a, None, &add).unwrap();
+        assert_eq!((o.format, o.bitrate, o.manual, o.fallback), (convert::Format::Flac, 256, true, true));
+        let o = job_options(&a, None, &serde_json::json!({"url": "u", "out": "/o"})).unwrap();
+        assert_eq!(o.format, convert::Format::M4a, "the command line's format when the job names none");
+        assert!(job_options(&a, None, &serde_json::json!({"url": "u"})).is_err());
         assert!(parse_args(&s(&["--what"])).is_err());
     }
 

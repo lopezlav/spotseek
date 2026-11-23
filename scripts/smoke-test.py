@@ -47,4 +47,12 @@ with tempfile.TemporaryDirectory() as tmp:
     info = subprocess.run([str(bin_dir / ('ffmpeg' + ext)), '-hide_banner', '-i', str(mp3)], env=env,
                           capture_output=True, text=True, timeout=60).stderr
     assert 'Audio: mp3' in info, info
+    # The other formats the user can choose: m4a (AAC) and FLAC.
+    for name, args, codec in [('smoke.m4a', ['-c:a', 'aac', '-b:a', '256k', '-f', 'ipod'], 'Audio: aac'),
+                              ('smoke.flac', ['-c:a', 'flac', '-f', 'flac'], 'Audio: flac')]:
+        out = Path(tmp) / name
+        run([bin_dir / ('ffmpeg' + ext), '-v', 'error', '-i', wav, *args, out])
+        info = subprocess.run([str(bin_dir / ('ffmpeg' + ext)), '-hide_banner', '-i', str(out)], env=env,
+                              capture_output=True, text=True, timeout=60).stderr
+        assert codec in info, info
 print('Packaged app and all bundled tools passed the smoke test.')

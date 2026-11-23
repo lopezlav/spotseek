@@ -6,7 +6,7 @@
 ;   build\windows\spotseek-backend.exe  - the engine (Rust) that the window runs
 ;   build\bin\*                 - bundled tools (yt-dlp, ffmpeg, deno)
 ; Output: build\installer\Spotseek-Setup-windows-x64.exe (one name for every version, so
-; https://github.com/lopezlav/spotseek/releases/latest/download/Spotseek-Setup-windows-x64.exe works).
+; https://github.com/keeeeeb/spotseek/releases/latest/download/Spotseek-Setup-windows-x64.exe works).
 ;
 ; The app updates itself by running this installer with /SILENT /CLOSEAPPLICATIONS /RELAUNCH=1:
 ; it closes Spotseek, replaces it and starts it again.

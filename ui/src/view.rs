@@ -74,7 +74,9 @@ fn link_text(key: &str, label: &str) -> El {
 // ------------------------------------------------------------------ root
 
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
-    let size = cx.layout_size("root").unwrap_or([1100.0, 760.0]);
+    let full = cx.layout_size("root").unwrap_or([1100.0, 760.0]);
+    // The screens get the room under the tab strip.
+    let size = [full[0], full[1] - TABS_H];
     let body = match s.phase {
         Phase::Idle if s.show_history => history_screen(s, size),
         Phase::Idle => idle(s, size),
@@ -85,14 +87,59 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let inset = cx.titlebar_inset().min(26.0);
     let mut root = col().key("root").w_full().h_full().pt(inset).fill(paper())
         .on_paste(|s: &mut State, pasted: &str, _: &mut Tx| s.paste(pasted))
-        .child(grid(size))
-        .child(body);
+        .child(grid(full))
+        .child(tab_strip(s, full[0]))
+        .child(col().key("tab-body").w_full().grow(1.0).min_h(0.0).child(body));
     if s.settings_open {
         root = root.child(settings_panel(s));
     } else if s.login_open {
         root = root.child(login_window(s));
     }
     root
+}
+
+/// The height of the tab strip.
+const TABS_H: f32 = 36.0;
+
+/// One tab per link: its name and how far it is; + opens a new one (⌘T).
+fn tab_strip(s: &State, width: f32) -> El {
+    let l = s.lang;
+    let infos = s.tab_infos();
+    let n = infos.len();
+    // Every tab gets the same width, up to 240.
+    let tab_w = ((width - 48.0 - 44.0) / n as f32).clamp(90.0, 240.0);
+    let mut strip = row().key("tabs").w_full().h(TABS_H).px(24.0).gap(6.0).center_y();
+    for (k, t) in infos.into_iter().enumerate() {
+        let on = k == s.tab;
+        let (bg, fg) = if on { (ink(), paper()) } else { (Color::TRANSPARENT, ink()) };
+        let mark = match t.phase {
+            Phase::Running => format!("{:.0}%", t.progress * 100.0),
+            Phase::Done => "✓".into(),
+            Phase::Failed => "!".into(),
+            Phase::Idle => String::new(),
+        };
+        let mut tab = row().key(format!("tab-{k}")).w(tab_w).h(28.0).pl(10.0).pr(4.0).gap(6.0).center_y()
+            .border(2.0, ink()).fill(bg).cursor(Cursor::Pointer).role("tab").label(t.label.clone())
+            .on_press(move |s: &mut State| s.switch_tab(k));
+        if t.phase == Phase::Running {
+            // How far it is, as a thin line along the bottom.
+            tab = tab.child(el().absolute(0.0, 22.0).size((tab_w - 4.0) * t.progress.clamp(0.0, 1.0), 2.0).fill(if on { paper() } else { red() }).inert());
+        }
+        tab = tab
+            .child(text(t.label).font(mono(12.0, 600.0)).color(fg).truncate().shrink().grow(1.0).min_w(0.0))
+            .child(text(mark).font(mono(11.0, 600.0)).color(fg));
+        if n > 1 || t.phase != Phase::Idle {
+            tab = tab.child(row().key(format!("tab-close-{k}")).size(20.0, 20.0).center().cursor(Cursor::Pointer).role("button")
+                .label(l.t("Close tab", "Cerrar pestaña")).hover(red())
+                .on_press(move |s: &mut State| s.close_tab(k))
+                .child(text("×").font(mono(14.0, 600.0)).color(fg)));
+        }
+        strip = strip.child(tab);
+    }
+    strip.child(row().key("tab-new").size(28.0, 28.0).center().border(2.0, ink()).cursor(Cursor::Pointer).role("button")
+        .label(l.t("New tab (⌘T)", "Pestaña nueva (⌘T)")).hover(red())
+        .on_press(|s: &mut State| s.new_tab())
+        .child(text("+").font(mono(16.0, 600.0)).color(ink())))
 }
 
 /// Faint graph paper behind everything.
@@ -125,7 +172,7 @@ fn idle(s: &State, size: [f32; 2]) -> El {
     let has_text = !s.link.text.trim().is_empty();
     let field_w = (size[0] - 220.0).clamp(280.0, 680.0);
     let field = text_input(&s.link, mono(24.0, 500.0)).key("link").single_line().w_full().caret(ink(), red().alpha(0.25))
-        .color(ink()).placeholder("https://open.spotify.com/…", muted())
+        .color(ink()).placeholder("open.spotify.com/… · soundcloud.com/…", muted())
         .on_edit(|s: &mut State| &mut s.link)
         .on_submit(|s: &mut State, _: &mut Tx| s.start());
     let underline = el().key("underline").w_full().h(4.0)
@@ -139,7 +186,7 @@ fn idle(s: &State, size: [f32; 2]) -> El {
     let hint = if !s.notice.is_empty() {
         s.notice.clone()
     } else if has_text && !ok {
-        l.t("THAT IS NOT A SPOTIFY LINK. PLAYLISTS, ALBUMS AND TRACKS WORK.", "ESO NO ES UN LINK DE SPOTIFY. FUNCIONAN PLAYLISTS, ÁLBUMES Y CANCIONES.").into()
+        l.t("THAT IS NOT A SPOTIFY OR SOUNDCLOUD LINK. PLAYLISTS, ALBUMS, SETS AND TRACKS WORK.", "ESO NO ES UN LINK DE SPOTIFY NI DE SOUNDCLOUD. FUNCIONAN PLAYLISTS, ÁLBUMES, SETS Y CANCIONES.").into()
     } else if ok {
         l.t("PRESS ENTER ↵ TO DOWNLOAD", "APRETÁ ENTER ↵ PARA DESCARGAR").into()
     } else {
@@ -148,7 +195,7 @@ fn idle(s: &State, size: [f32; 2]) -> El {
     let no_account = s.account == Account::None;
     let hint_color = if has_text && !ok { red() } else { muted() };
     let footer = row().w_full().h(40.0).center_y().justify_between()
-        .child(text(format!("{} · MP3 {}", s.settings.short_dir(), s.settings.bitrate)).key("where").font(mono(14.0, 500.0)).color(ink())
+        .child(text(format!("{} · {}", s.settings.short_dir(), s.settings.quality_label())).key("where").font(mono(14.0, 500.0)).color(ink())
             .cursor(Cursor::Pointer).on_press(|s: &mut State| s.settings_open = true))
         .child(row().gap(28.0).center_y()
             .child(pick_toggle(s))
@@ -174,7 +221,7 @@ fn idle(s: &State, size: [f32; 2]) -> El {
         page = page.child(update_banner(s));
     }
     page
-        .child(headline(s, l.t("Paste a Spotify link", "Pegá un link de Spotify")).grow(1.0).min_h(160.0))
+        .child(headline(s, l.t("Paste a link", "Pegá un link")).grow(1.0).min_h(160.0))
         .child(row().w_full().center().gap(18.0).pt(10.0)
             .child(col().w(field_w).gap(6.0).child(field).child(underline))
             .child(go))
@@ -321,11 +368,16 @@ fn status(s: &State) -> &'static str {
     }
     match s.stage.as_str() {
         "spotify" => l.t("READING SPOTIFY", "LEYENDO SPOTIFY"),
+        "soundcloud" => l.t("READING SOUNDCLOUD", "LEYENDO SOUNDCLOUD"),
         "soulseek" if s.downloading() => l.t("DOWNLOADING FROM SOULSEEK", "DESCARGANDO DE SOULSEEK"),
         "soulseek" => l.t("SEARCHING SOULSEEK", "BUSCANDO EN SOULSEEK"),
         "youtube" if s.downloading() => l.t("DOWNLOADING FROM YOUTUBE MUSIC", "DESCARGANDO DE YOUTUBE MUSIC"),
         "youtube" => l.t("SEARCHING YOUTUBE MUSIC", "BUSCANDO EN YOUTUBE MUSIC"),
-        "convert" => l.t("CONVERTING TO MP3", "CONVIRTIENDO A MP3"),
+        "convert" => match s.settings.format.as_str() {
+            "m4a" => l.t("CONVERTING TO M4A", "CONVIRTIENDO A M4A"),
+            "flac" => l.t("CONVERTING TO FLAC", "CONVIRTIENDO A FLAC"),
+            _ => l.t("CONVERTING TO MP3", "CONVIRTIENDO A MP3"),
+        },
         "done" => l.t("FINISHING", "TERMINANDO"),
         _ => l.t("CONNECTING", "CONECTANDO"),
     }
@@ -757,9 +809,9 @@ fn cell(s: &State, i: usize, t: &Track, open: bool, width: f32) -> El {
             let p = if t.total > 0 { t.bytes as f32 / t.total as f32 } else { 0.0 };
             (ink(), paper(), format!("{:.0}%", p * 100.0))
         }
-        TState::Done => (stripe(i), ink(), if t.youtube { "YT".into() } else { "OK".into() }),
+        TState::Done => (stripe(i), ink(), if t.soundcloud { "SC".into() } else if t.youtube { "YT".into() } else { "OK".into() }),
         TState::Failed => (Color::TRANSPARENT, ink(), l.t("TRYING YT…", "PROBANDO YT…").into()),
-        TState::YtSearch | TState::YtDownload => (yellow(), ink(), "→ YT".into()),
+        TState::YtSearch | TState::YtDownload => (yellow(), ink(), if t.soundcloud { "→ SC".into() } else { "→ YT".into() }),
         TState::Missing => (Color::TRANSPARENT, muted(), l.t("MISSING", "FALTA").into()),
         TState::Have => (Color::TRANSPARENT, ink(), String::new()),
         TState::Queued => (Color::TRANSPARENT, ink(), l.t("AGAIN ↓", "DE NUEVO ↓").into()),
@@ -1007,6 +1059,7 @@ fn detail_panel(s: &State, key: &str, d: &Detail, width: f32) -> El {
     let source = match d.source.as_str() {
         "soulseek" => "SOULSEEK",
         "youtube" => "YOUTUBE MUSIC",
+        "soundcloud" => "SOUNDCLOUD",
         _ => "",
     };
     fact(l.t("SOURCE", "FUENTE"), source.into());
@@ -1036,7 +1089,8 @@ fn detail_panel(s: &State, key: &str, d: &Detail, width: f32) -> El {
     }
     if !d.url.is_empty() {
         let u = d.url.clone();
-        links = links.child(text(l.t("OPEN ON YOUTUBE ↗", "ABRIR EN YOUTUBE ↗")).key("yt").font(mono(12.0, 600.0)).color(paper()).cursor(Cursor::Pointer).role("link")
+        let open = if d.source == "soundcloud" { l.t("OPEN ON SOUNDCLOUD ↗", "ABRIR EN SOUNDCLOUD ↗") } else { l.t("OPEN ON YOUTUBE ↗", "ABRIR EN YOUTUBE ↗") };
+        links = links.child(text(open).key("yt").font(mono(12.0, 600.0)).color(paper()).cursor(Cursor::Pointer).role("link")
             .on_press_tx(move |_: &mut State, tx: &mut Tx| {
                 let _ = tx.open_url(&u);
             }));
@@ -1045,7 +1099,7 @@ fn detail_panel(s: &State, key: &str, d: &Detail, width: f32) -> El {
     let player_el = if d.path.is_empty() {
         text(if d.moved {
             l.t("THE FILE IS NOT IN THE FOLDER ANY MORE.", "EL ARCHIVO YA NO ESTÁ EN LA CARPETA.")
-        } else if d.source == "youtube" {
+        } else if d.source == "youtube" || d.source == "soundcloud" {
             l.t("THE PLAYER SHOWS UP WHEN THE TRACK IS DOWNLOADED.", "EL REPRODUCTOR APARECE CUANDO LA CANCIÓN SE DESCARGA.")
         } else {
             l.t("YOU CAN LISTEN AS SOON AS IT STARTS TO DOWNLOAD.", "LA PODÉS ESCUCHAR APENAS EMPIECE A DESCARGARSE.")
@@ -1239,8 +1293,8 @@ fn poster(s: &State, size: [f32; 2]) -> El {
             row_el = row_el.border(1.0, ink().alpha(0.15));
         }
         let tag = |t: &str| row().px(6.0).py(2.0).fill(ink()).child(text(t.to_string()).font(mono((fs * 0.4).clamp(10.0, 18.0), 600.0)).color(paper()));
-        if t.youtube && t.state == TState::Done {
-            row_el = row_el.child(tag("YT"));
+        if t.streamed() && t.state == TState::Done {
+            row_el = row_el.child(tag(if t.soundcloud { "SC" } else { "YT" }));
         }
         if had {
             row_el = row_el.child(tag(l.t("ALREADY HAD", "YA ESTABA")));
@@ -1251,8 +1305,9 @@ fn poster(s: &State, size: [f32; 2]) -> El {
         let open = (s.open.as_deref() == Some(key.as_str())).then_some(key);
         stripes = stripes.child(row_el).child(band(s, format!("pband-{i}"), open, size[0]));
     }
-    let mb = s.tracks.iter().filter(|t| t.state == TState::Done && !t.youtube).map(|t| t.total).sum::<u64>() as f32 / 1_000_000.0;
-    let yt = s.tracks.iter().filter(|t| t.youtube && t.state == TState::Done).count();
+    let mb = s.tracks.iter().filter(|t| t.state == TState::Done && !t.streamed()).map(|t| t.total).sum::<u64>() as f32 / 1_000_000.0;
+    let yt = s.tracks.iter().filter(|t| t.youtube && !t.soundcloud && t.state == TState::Done).count();
+    let sc = s.tracks.iter().filter(|t| t.soundcloud && t.state == TState::Done).count();
     let missing = s.count(TState::Missing);
     let had = s.count(TState::Skipped);
     let mut stats = l.tracks(s.count(TState::Done));
@@ -1261,6 +1316,9 @@ fn poster(s: &State, size: [f32; 2]) -> El {
     }
     if yt > 0 {
         stats += &format!(" · {yt} {}", l.t("FROM YOUTUBE", "DE YOUTUBE"));
+    }
+    if sc > 0 {
+        stats += &format!(" · {sc} {}", l.t("FROM SOUNDCLOUD", "DE SOUNDCLOUD"));
     }
     if had > 0 {
         stats += &format!(" · {had} {}", l.t("ALREADY HAD", "YA ESTABAN"));
@@ -1342,6 +1400,8 @@ fn history_list(s: &State, except: &str, width: f32) -> El {
                 l.t("FILE MOVED", "SE MOVIÓ")
             } else if t.source == "youtube" {
                 "YT"
+            } else if t.source == "soundcloud" {
+                "SC"
             } else {
                 ""
             };
@@ -1383,10 +1443,21 @@ fn settings_panel(s: &State) -> El {
             .fill(if on { ink() } else { Color::TRANSPARENT })
             .child(text(label.to_string()).font(mono(14.0, 600.0)).color(if on { paper() } else { ink() }))
     };
-    let mut quality = row().gap(0.0);
-    for b in ["320", "256", "192", "128"] {
-        quality = quality.child(choice(format!("q{b}"), b, s.settings.bitrate == b).w(70.0).on_press(move |s: &mut State| s.settings.bitrate = b.into()));
+    let mut format = row().gap(0.0);
+    for (k, name) in [("mp3", "MP3"), ("m4a", "M4A"), ("flac", "FLAC")] {
+        format = format.child(choice(format!("f-{k}"), name, s.settings.format == k).w(70.0).on_press(move |s: &mut State| s.settings.format = k.into()));
     }
+    let lossless = s.settings.format == "flac";
+    let quality = if lossless {
+        // FLAC keeps all the sound: there is no bitrate to choose.
+        row().h(40.0).center_y().child(text(l.t("LOSSLESS · NO BITRATE", "SIN PÉRDIDA · SIN BITRATE")).font(mono(14.0, 600.0)).color(muted()))
+    } else {
+        let mut q = row().gap(0.0);
+        for b in ["320", "256", "192", "128"] {
+            q = q.child(choice(format!("q{b}"), b, s.settings.bitrate == b).w(70.0).on_press(move |s: &mut State| s.settings.bitrate = b.into()));
+        }
+        q
+    };
     let mut lang = row().gap(0.0);
     for (k, name) in [("auto", l.t("SYSTEM", "SISTEMA")), ("en", "ENGLISH"), ("es", "ESPAÑOL")] {
         lang = lang.child(choice(format!("lang-{k}"), name, s.settings.lang == k).on_press(move |s: &mut State| s.set_lang(k)));
@@ -1412,17 +1483,21 @@ fn settings_panel(s: &State) -> El {
                 });
             })))
         .child(row().w_full().gap(28.0)
-            .child(col().gap(8.0).child(label(l.t("MP3 QUALITY (KBPS)", "CALIDAD DEL MP3 (KBPS)"))).child(quality))
-            .child(col().gap(8.0).child(label(l.t("LANGUAGE", "IDIOMA"))).child(lang)))
+            .child(col().gap(8.0).child(label(l.t("FORMAT", "FORMATO"))).child(format))
+            .child(col().gap(8.0).child(label(l.t("QUALITY (KBPS)", "CALIDAD (KBPS)"))).child(quality)))
+
         .child(label(l.t("WHICH FILE TO DOWNLOAD", "QUÉ ARCHIVO DESCARGAR")))
         .child(row().gap(0.0)
             .child(choice("files-auto".into(), l.t("THE BEST ONE, BY ITSELF", "EL MEJOR, SOLO"), !s.settings.manual).on_press(|s: &mut State| s.settings.manual = false))
             .child(choice("files-manual".into(), l.t("I PICK FOR EACH SONG", "ELIJO YO EN CADA CANCIÓN"), s.settings.manual).on_press(|s: &mut State| s.settings.manual = true)))
-        .child(label(l.t("WHEN SOULSEEK CANNOT FIND A TRACK", "SI SOULSEEK NO ENCUENTRA UNA CANCIÓN")))
-        .child(row().key("fallback").gap(10.0).center_y().cursor(Cursor::Pointer).on_press(|s: &mut State| s.settings.fallback = !s.settings.fallback)
-            .child(row().size(22.0, 22.0).center().border(2.0, ink()).fill(if fb { ink() } else { Color::TRANSPARENT })
-                .child(text(if fb { "✓" } else { "" }).font(mono(13.0, 600.0)).color(paper())))
-            .child(text(l.t("TRY YOUTUBE MUSIC", "PROBAR CON YOUTUBE MUSIC")).font(mono(14.0, 600.0)).color(ink())))
+        .child(row().w_full().gap(28.0)
+            .child(col().gap(8.0)
+                .child(label(l.t("WHEN SOULSEEK CANNOT FIND A TRACK", "SI SOULSEEK NO ENCUENTRA UNA CANCIÓN")))
+                .child(row().key("fallback").h(40.0).gap(10.0).center_y().cursor(Cursor::Pointer).on_press(|s: &mut State| s.settings.fallback = !s.settings.fallback)
+                    .child(row().size(22.0, 22.0).center().border(2.0, ink()).fill(if fb { ink() } else { Color::TRANSPARENT })
+                        .child(text(if fb { "✓" } else { "" }).font(mono(13.0, 600.0)).color(paper())))
+                    .child(text(l.t("TRY YOUTUBE MUSIC", "PROBAR CON YOUTUBE MUSIC")).font(mono(14.0, 600.0)).color(ink()))))
+            .child(col().gap(8.0).child(label(l.t("LANGUAGE", "IDIOMA"))).child(lang)))
         .child(label(l.t("LISTENING", "ESCUCHAR")))
         .child(row().key("hover-play").gap(10.0).center_y().cursor(Cursor::Pointer).on_press(|s: &mut State| {
                 let on = !s.settings.hover_play;

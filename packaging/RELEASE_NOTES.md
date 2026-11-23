@@ -1,3 +1,24 @@
+## New in 0.2.6
+
+- **Tabs: download several links at once.** Press **+** at the top of the window (or ⌘T / Ctrl+T)
+  and paste another link while the first one downloads. Each tab shows its own list and
+  progress; × closes a tab (a download in it stops, what it finished is kept). All tabs share
+  one Soulseek sign-in, since an account can be online in one place only, and the 12 download
+  slots and Soulseek's search limit are shared too.
+
+## New in 0.2.5
+
+- **A new home.** Downloads and in-app updates now come from
+  [github.com/keeeeeb/spotseek](https://github.com/keeeeeb/spotseek).
+- **SoundCloud links.** Paste a SoundCloud track, set, or a profile's tracks or likes. Each song
+  is looked for on Soulseek first, like a Spotify song. When Soulseek does not have it, it comes
+  from SoundCloud itself (marked SC), and YouTube Music is the last try. SoundCloud Go+ songs
+  give only a 30-second preview, so those are never saved as the song.
+- **Choose the format: MP3, M4A or FLAC.** In SETTINGS, FORMAT sets the files Spotseek makes.
+  M4A (AAC) uses the bitrate you choose, like MP3. FLAC is lossless: Spotseek looks for lossless
+  files first and keeps their full sound. When only an mp3 or YouTube audio is found, it is
+  saved as FLAC with the sound it has (it is not made better).
+
 ## New in 0.2.4
 
 - **Fixed: "spotify: bad entity".** Some playlists did not open at all: Spotify sends no size for
@@ -29,9 +50,8 @@
   UPDATE downloads it, checks it, and starts the new Spotseek. (This version is the last one to
   install by hand.)
 - **Install with one command.** macOS and Linux:
-  `curl -fsSL https://github.com/lopezlav/spotseek/releases/latest/download/install.sh | sh`.
-  Windows: `irm https://github.com/lopezlav/spotseek/releases/latest/download/install.ps1 | iex`.
-  Homebrew (`brew install lopezlav/tap/spotseek`) and winget follow.
+  `curl -fsSL https://github.com/keeeeeb/spotseek/releases/latest/download/install.sh | sh`.
+  Windows: `irm https://github.com/keeeeeb/spotseek/releases/latest/download/install.ps1 | iex`.
 - **Intel Macs too** (macOS 12 or later), and a disk image for each Mac. Linux also gets an
   AppImage: one file, nothing to install.
 - **A smaller download.** ffprobe is gone, and ffmpeg is a small build with only what Spotseek

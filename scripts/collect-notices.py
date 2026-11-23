@@ -57,7 +57,7 @@ for pkg in packages.values():
             break
 (out / 'rust-crates.txt').write_text('\n'.join(sorted(crates)) + '\n')
 (out / 'SOURCES.txt').write_text('\n'.join([
-    'Spotseek: https://github.com/lopezlav/spotseek (see the matching release tag)',
+    'Spotseek: https://github.com/keeeeeb/spotseek (see the matching release tag)',
     f"yt-dlp: https://github.com/yt-dlp/yt-dlp/tree/{v['ytdlp']}",
     f"Deno: https://github.com/denoland/deno/tree/{v['deno']}",
     'FFmpeg (LGPL build): see ffmpeg-SOURCES.txt and scripts/build-ffmpeg.sh in the Spotseek source',

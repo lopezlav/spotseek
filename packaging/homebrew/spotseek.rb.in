@@ -1,6 +1,6 @@
 # The Homebrew cask for Spotseek. The release workflow fills in the version and checksums
-# (scripts/render-cask.py) and pushes it to github.com/lopezlav/homebrew-tap:
-#   brew install lopezlav/tap/spotseek
+# (scripts/render-cask.py) and pushes it to github.com/keeeeeb/homebrew-tap:
+#   brew install keeeeeb/tap/spotseek
 cask "spotseek" do
   arch arm: "arm64", intel: "x64"
 
@@ -8,10 +8,10 @@ cask "spotseek" do
   sha256 arm:   "@SHA_ARM64@",
          intel: "@SHA_X64@"
 
-  url "https://github.com/lopezlav/spotseek/releases/download/v#{version}/Spotseek-macOS-#{arch}.zip"
+  url "https://github.com/keeeeeb/spotseek/releases/download/v#{version}/Spotseek-macOS-#{arch}.zip"
   name "Spotseek"
   desc "Downloads Spotify playlists as mp3 files from Soulseek and YouTube Music"
-  homepage "https://github.com/lopezlav/spotseek"
+  homepage "https://github.com/keeeeeb/spotseek"
 
   livecheck do
     url :url
